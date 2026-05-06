@@ -3,6 +3,7 @@ import GRDB
 
 enum SettingsKey: String {
     case displayName = "display_name"
+    case firstRunComplete = "first_run_complete"
 }
 
 struct SettingsStore {
@@ -28,5 +29,14 @@ struct SettingsStore {
                 arguments: [key.rawValue, value]
             )
         }
+    }
+
+    func bool(forKey key: SettingsKey) async throws -> Bool {
+        let raw = try await string(forKey: key)
+        return raw == "true"
+    }
+
+    func setBool(_ value: Bool, forKey key: SettingsKey) async throws {
+        try await setString(value ? "true" : "false", forKey: key)
     }
 }

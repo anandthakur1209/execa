@@ -1,12 +1,15 @@
+import AVFoundation
 import SwiftUI
 
 struct SetupWizardView: View {
     let coordinator: AppCoordinator
+    var onComplete: (() -> Void)?
 
     @State private var step: Step = .permissions
     @State private var displayName: String = NSFullUserName()
-    @State private var savedDisplayName: String?
     @State private var saveError: String?
+    @State private var micStatus: AVAuthorizationStatus = .notDetermined
+    @State private var screenStatus: Bool = false
 
     enum Step: Int, CaseIterable {
         case permissions, sttKeys, llmKeys, displayName, done
@@ -25,6 +28,7 @@ struct SetupWizardView: View {
             if let saved = try? await coordinator.currentDisplayName(), !saved.isEmpty {
                 displayName = saved
             }
+            await refreshPermissionStatus()
         }
     }
 
@@ -49,10 +53,7 @@ struct SetupWizardView: View {
     private var content: some View {
         switch step {
         case .permissions:
-            placeholder("""
-            execa needs microphone and screen-recording permissions to capture meeting audio. \
-            We'll ask the system for them on first recording — for now, just continue.
-            """)
+            permissionsStep
         case .sttKeys:
             placeholder("""
             Add your Sarvam (or Deepgram) API key on this step. Validation arrives in a later \
@@ -76,6 +77,43 @@ struct SetupWizardView: View {
         }
     }
 
+    private var permissionsStep: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("execa needs two macOS permissions to record meetings.")
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Image(systemName: micStatus == .authorized ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(micStatus == .authorized ? .green : .secondary)
+                Text("Microphone")
+                Spacer()
+                if micStatus != .authorized {
+                    Button("Request") {
+                        Task { await requestMic() }
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                Image(systemName: screenStatus ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(screenStatus ? .green : .secondary)
+                Text("Screen Recording")
+                    .help("Used only to capture system audio from meeting apps. Screen contents are never recorded.")
+                Spacer()
+                if !screenStatus {
+                    Button("Open Settings…") {
+                        Task {
+                            coordinator.permissions.openScreenRecordingSettings()
+                            await refreshPermissionStatus()
+                        }
+                    }
+                }
+            }
+            Button("Refresh status") {
+                Task { await refreshPermissionStatus() }
+            }
+            .buttonStyle(.link)
+        }
+    }
+
     private var displayNameStep: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("How should the transcript label you when you speak?")
@@ -90,12 +128,9 @@ struct SetupWizardView: View {
     private var doneStep: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Setup is done.").bold()
-            if let savedDisplayName {
-                Text("You'll appear as \"\(savedDisplayName)\" in transcripts.")
-                    .foregroundStyle(.secondary)
-            }
-            Text("Recording features will arrive in the next phase.")
-                .font(.caption).foregroundStyle(.tertiary)
+            Text("Look for the execa icon in your menu bar to start a meeting.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -112,7 +147,11 @@ struct SetupWizardView: View {
     @ViewBuilder
     private var primaryButton: some View {
         switch step {
-        case .permissions, .sttKeys, .llmKeys:
+        case .permissions:
+            Button("Next") { advance() }
+                .keyboardShortcut(.defaultAction)
+                .disabled(micStatus != .authorized || !screenStatus)
+        case .sttKeys, .llmKeys:
             Button("Next") { advance() }
                 .keyboardShortcut(.defaultAction)
         case .displayName:
@@ -120,7 +159,8 @@ struct SetupWizardView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(displayName.trimmingCharacters(in: .whitespaces).isEmpty)
         case .done:
-            EmptyView()
+            Button("Close") { onComplete?() }
+                .keyboardShortcut(.defaultAction)
         }
     }
 
@@ -134,11 +174,21 @@ struct SetupWizardView: View {
         step = previous
     }
 
+    private func requestMic() async {
+        _ = await coordinator.permissions.requestMicrophone()
+        await refreshPermissionStatus()
+    }
+
+    private func refreshPermissionStatus() async {
+        micStatus = await coordinator.permissions.microphoneStatus()
+        screenStatus = coordinator.permissions.screenRecordingStatus()
+    }
+
     private func finish() async {
         let name = displayName.trimmingCharacters(in: .whitespaces)
         do {
             try await coordinator.setDisplayName(name)
-            savedDisplayName = name
+            try await coordinator.markFirstRunComplete()
             step = .done
         } catch {
             saveError = String(describing: error)
