@@ -6,7 +6,7 @@ enum KeychainError: Error, Equatable {
     case unexpectedItemFormat
 }
 
-struct KeychainStore: Sendable {
+struct KeychainStore {
     static func serviceName(forProvider provider: String) -> String {
         "com.anandthakur.execa.\(provider)"
     }
@@ -18,7 +18,7 @@ struct KeychainStore: Sendable {
         let baseQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            kSecAttrAccount as String: account
         ]
         let updateAttributes: [String: Any] = [kSecValueData as String: data]
         let updateStatus = SecItemUpdate(baseQuery as CFDictionary, updateAttributes as CFDictionary)
@@ -40,7 +40,7 @@ struct KeychainStore: Sendable {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
@@ -60,10 +60,10 @@ struct KeychainStore: Sendable {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            kSecAttrAccount as String: account
         ]
         let status = SecItemDelete(query as CFDictionary)
-        if status != errSecSuccess && status != errSecItemNotFound {
+        if status != errSecSuccess, status != errSecItemNotFound {
             throw KeychainError.osStatus(status)
         }
     }

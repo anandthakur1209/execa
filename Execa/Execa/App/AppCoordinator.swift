@@ -8,8 +8,8 @@ actor AppCoordinator {
     init() async throws {
         let database = try Database.make()
         self.database = database
-        self.settings = SettingsStore(database: database)
-        self.keychain = KeychainStore()
+        settings = SettingsStore(database: database)
+        keychain = KeychainStore()
     }
 
     func currentDisplayName() async throws -> String? {

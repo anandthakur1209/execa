@@ -1,11 +1,11 @@
 import Foundation
 import GRDB
 
-enum SettingsKey: String, Sendable {
+enum SettingsKey: String {
     case displayName = "display_name"
 }
 
-struct SettingsStore: Sendable {
+struct SettingsStore {
     let database: Database
 
     func string(forKey key: SettingsKey) async throws -> String? {

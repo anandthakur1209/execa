@@ -44,9 +44,15 @@ struct SetupWizardView: View {
     private var content: some View {
         switch step {
         case .permissions:
-            placeholder("execa needs microphone and screen-recording permissions to capture meeting audio. We'll ask the system for them on first recording — for now, just continue.")
+            placeholder("""
+            execa needs microphone and screen-recording permissions to capture meeting audio. \
+            We'll ask the system for them on first recording — for now, just continue.
+            """)
         case .sttKeys:
-            placeholder("Add your Sarvam (or Deepgram) API key on this step. Validation arrives in a later phase; for now the wizard just walks you through.")
+            placeholder("""
+            Add your Sarvam (or Deepgram) API key on this step. Validation arrives in a later \
+            phase; for now the wizard just walks you through.
+            """)
         case .llmKeys:
             placeholder("Add your Anthropic (or OpenAI / Gemini) API key. Validation arrives later.")
         case .displayName:

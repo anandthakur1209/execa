@@ -1,8 +1,7 @@
+@testable import Execa
 import Foundation
 import GRDB
 import Testing
-
-@testable import Execa
 
 struct DatabaseMigrationTests {
     @Test func migrationsRunCleanly() async throws {
@@ -13,13 +12,13 @@ struct DatabaseMigrationTests {
 
         let database = try Database.make(at: tempURL)
 
-        let expectedTables: Set<String> = [
+        let expectedTables: Set = [
             "meetings",
             "speakers",
             "transcript_segments",
             "summaries",
             "prompt_templates",
-            "settings",
+            "settings"
         ]
 
         let actualTables: Set<String> = try await database.queue.read { db in

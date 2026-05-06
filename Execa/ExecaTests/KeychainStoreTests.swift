@@ -1,7 +1,6 @@
+@testable import Execa
 import Foundation
 import Testing
-
-@testable import Execa
 
 struct KeychainStoreTests {
     @Test func roundTrip() throws {

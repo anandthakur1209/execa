@@ -3,9 +3,16 @@ included:
 
 excluded:
   - Execa/Execa.xcodeproj
+  - Execa/ExecaUITests
   - .build
   - "**/.build"
   - "**/Pods"
+
+# trailing_comma is disabled because swiftformat's default behavior keeps
+# trailing commas on multi-line collection literals — the modern Swift
+# convention. Keeping the rule on creates a fight between the two tools.
+disabled_rules:
+  - trailing_comma
 
 opt_in_rules:
   - force_unwrapping
@@ -28,6 +35,17 @@ force_unwrapping:
   excluded:
     - Execa/ExecaTests
     - Execa/ExecaUITests
+
+# `db` is the GRDB-canonical closure parameter name; `id` is conventional
+# for primary-key Identifiables.
+identifier_name:
+  min_length:
+    warning: 2
+    error: 1
+  allowed_symbols: ["_"]
+  excluded:
+    - id
+    - db
 
 line_length:
   warning: 120

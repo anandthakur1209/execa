@@ -1,15 +1,14 @@
 import Foundation
 import GRDB
 
-nonisolated final class Database: @unchecked Sendable {
+final nonisolated class Database: @unchecked Sendable {
     let queue: DatabaseQueue
 
     static func make(at url: URL? = nil) throws -> Database {
-        let resolved: URL
-        if let url {
-            resolved = url
+        let resolved: URL = if let url {
+            url
         } else {
-            resolved = try Database.defaultURL()
+            try Database.defaultURL()
         }
         try FileManager.default.createDirectory(
             at: resolved.deletingLastPathComponent(),
