@@ -4,4 +4,5 @@
 --self remove
 --commas inline
 --ifdef no-indent
+--disable wrapMultilineStatementBraces
 --exclude Execa/Execa.xcodeproj,Execa/ExecaUITests,.build,**/.build

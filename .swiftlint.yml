@@ -11,8 +11,13 @@ excluded:
 # trailing_comma is disabled because swiftformat's default behavior keeps
 # trailing commas on multi-line collection literals — the modern Swift
 # convention. Keeping the rule on creates a fight between the two tools.
+#
+# todo is disabled because we deliberately leave TODO/FIXME markers tied to
+# specific future phases (e.g. "TODO: macOS 15 path", "FIXME(phase-5):
+# alignment"). They're tracked via grep + BUILD_PLAN.md, not the lint pass.
 disabled_rules:
   - trailing_comma
+  - todo
 
 opt_in_rules:
   - force_unwrapping

@@ -17,14 +17,16 @@ enum AudioFileWriterError: Error, Equatable {
     }
 }
 
-actor AudioFileWriter {
+/// AVAudioFile is reference-typed and not thread-safe, but AVFAudio guarantees
+/// single-thread-write safety. The audio tap thread is the sole writer; close()
+/// is called from the source actor on stop and releases the AVAudioFile so its
+/// deinit flushes the underlying AudioFileClose. The lock guards the brief
+/// window where a stale buffer could land after close.
+final nonisolated class AudioFileWriter: @unchecked Sendable {
+    private let lock = NSLock()
     private var file: AVAudioFile?
-    private let url: URL
-    private let format: AVAudioFormat
 
     init(url: URL, format: AVAudioFormat) throws {
-        self.url = url
-        self.format = format
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: format.sampleRate,
@@ -47,6 +49,8 @@ actor AudioFileWriter {
     }
 
     func write(_ buffer: AVAudioPCMBuffer) throws {
+        lock.lock()
+        defer { lock.unlock() }
         guard let file else { return }
         do {
             try file.write(from: buffer)
@@ -56,6 +60,8 @@ actor AudioFileWriter {
     }
 
     func close() {
+        lock.lock()
+        defer { lock.unlock() }
         file = nil
     }
 }

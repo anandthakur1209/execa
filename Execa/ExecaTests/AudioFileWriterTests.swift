@@ -4,7 +4,7 @@ import Foundation
 import Testing
 
 struct AudioFileWriterTests {
-    @Test func writeAndReadBackOneSecondSine() async throws {
+    @Test func writeAndReadBackOneSecondSine() throws {
         let sampleRate: Double = 48000
         let frameCount = AVAudioFrameCount(sampleRate)
         guard let format = AVAudioFormat(
@@ -35,8 +35,8 @@ struct AudioFileWriterTests {
         defer { try? FileManager.default.removeItem(at: url) }
 
         let writer = try AudioFileWriter(url: url, format: format)
-        try await writer.write(buffer)
-        await writer.close()
+        try writer.write(buffer)
+        writer.close()
 
         let readBack = try AVAudioFile(forReading: url)
         #expect(readBack.length == AVAudioFramePosition(frameCount))
