@@ -24,7 +24,7 @@ Refuse changes that violate any of these. If a task seems to require it, raise t
 
 ## Dependencies — SPM only
 
-Sanctioned: `GRDB.swift`, `KeyboardShortcuts` (Sindre Sorhus), `Yams`, `Sparkle`, `Sentry-Swift`. WebSockets via native `URLSessionWebSocketTask` — no Starscream. No Homebrew runtime deps, no Python, no Node. Adding anything outside this list needs an explicit reason tied to a spec requirement, recorded in `DECISIONS.md`.
+Sanctioned: `GRDB.swift`, `KeyboardShortcuts` (Sindre Sorhus), `Yams`, `Sparkle`, `sentry-cocoa` (product `Sentry`). WebSockets via native `URLSessionWebSocketTask` — no Starscream. No Homebrew runtime deps, no Python, no Node. Adding anything outside this list needs an explicit reason tied to a spec requirement, recorded in `DECISIONS.md`.
 
 ## Code conventions
 

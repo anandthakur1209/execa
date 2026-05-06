@@ -1,0 +1,7 @@
+--swiftversion 5.10
+--indent 4
+--maxwidth 120
+--self insert
+--commas inline
+--ifdef no-indent
+--exclude Execa/Execa.xcodeproj,.build,**/.build

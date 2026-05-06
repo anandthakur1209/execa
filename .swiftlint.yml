@@ -1,0 +1,36 @@
+included:
+  - Execa
+
+excluded:
+  - Execa/Execa.xcodeproj
+  - .build
+  - "**/.build"
+  - "**/Pods"
+
+opt_in_rules:
+  - force_unwrapping
+
+# CLAUDE.md permits force-* in test fixtures only; production code must avoid them.
+force_cast:
+  severity: error
+  excluded:
+    - Execa/ExecaTests
+    - Execa/ExecaUITests
+
+force_try:
+  severity: error
+  excluded:
+    - Execa/ExecaTests
+    - Execa/ExecaUITests
+
+force_unwrapping:
+  severity: error
+  excluded:
+    - Execa/ExecaTests
+    - Execa/ExecaUITests
+
+line_length:
+  warning: 120
+  error: 160
+  ignores_comments: true
+  ignores_urls: true
