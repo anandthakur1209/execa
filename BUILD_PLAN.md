@@ -31,7 +31,7 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 - `xcodebuild -scheme Execa build` clean.
 - `xcodebuild -scheme Execa test` passes (one round-trip test against `KeychainStore` and one against `Database` migrations).
 - App launches, shows Setup Wizard, persists "display name" to settings table, exits cleanly.
-- App is signed with personal Developer ID (local signing — no notarization yet).
+- App is signed with the Apple Development cert via automatic signing using the configured Team ID. Developer ID Application setup, notarization, and `create-dmg` are deferred to Phase 7.
 
 ---
 
