@@ -1,0 +1,24 @@
+//
+//  ContentView.swift
+//  Execa
+//
+//  Created by Anand1 Thakur on 06/05/26.
+//
+
+import SwiftUI
+
+struct ContentView: View {
+    var body: some View {
+        VStack {
+            Image(systemName: "globe")
+                .imageScale(.large)
+                .foregroundStyle(.tint)
+            Text("Hello, world!")
+        }
+        .padding()
+    }
+}
+
+#Preview {
+    ContentView()
+}
