@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA01000000000000000000C1 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B1 /* GRDB */; };
+		AA01000000000000000000C2 /* KeyboardShortcuts in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B2 /* KeyboardShortcuts */; };
+		AA01000000000000000000C3 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B3 /* Yams */; };
+		AA01000000000000000000C4 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B4 /* Sparkle */; };
+		AA01000000000000000000C5 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B5 /* Sentry */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		4AAFDF8D2FAB3CAF006ABADC /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +60,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA01000000000000000000C1 /* GRDB in Frameworks */,
+				AA01000000000000000000C2 /* KeyboardShortcuts in Frameworks */,
+				AA01000000000000000000C3 /* Yams in Frameworks */,
+				AA01000000000000000000C4 /* Sparkle in Frameworks */,
+				AA01000000000000000000C5 /* Sentry in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +125,11 @@
 			);
 			name = Execa;
 			packageProductDependencies = (
+				AA01000000000000000000B1 /* GRDB */,
+				AA01000000000000000000B2 /* KeyboardShortcuts */,
+				AA01000000000000000000B3 /* Yams */,
+				AA01000000000000000000B4 /* Sparkle */,
+				AA01000000000000000000B5 /* Sentry */,
 			);
 			productName = Execa;
 			productReference = 4AAFDF7F2FAB3CAB006ABADC /* Execa.app */;
@@ -195,6 +213,13 @@
 			);
 			mainGroup = 4AAFDF762FAB3CAB006ABADC;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA01000000000000000000A1 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+				AA01000000000000000000A2 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */,
+				AA01000000000000000000A3 /* XCRemoteSwiftPackageReference "Yams" */,
+				AA01000000000000000000A4 /* XCRemoteSwiftPackageReference "Sparkle" */,
+				AA01000000000000000000A5 /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4AAFDF802FAB3CAB006ABADC /* Products */;
 			projectDirPath = "";
@@ -633,6 +658,77 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA01000000000000000000A1 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 6.29.0;
+			};
+		};
+		AA01000000000000000000A2 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sindresorhus/KeyboardShortcuts";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.2.0;
+			};
+		};
+		AA01000000000000000000A3 /* XCRemoteSwiftPackageReference "Yams" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/jpsim/Yams";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.1.0;
+			};
+		};
+		AA01000000000000000000A4 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.6.0;
+			};
+		};
+		AA01000000000000000000A5 /* XCRemoteSwiftPackageReference "sentry-cocoa" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/getsentry/sentry-cocoa";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 8.36.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA01000000000000000000B1 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA01000000000000000000A1 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+		AA01000000000000000000B2 /* KeyboardShortcuts */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA01000000000000000000A2 /* XCRemoteSwiftPackageReference "KeyboardShortcuts" */;
+			productName = KeyboardShortcuts;
+		};
+		AA01000000000000000000B3 /* Yams */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA01000000000000000000A3 /* XCRemoteSwiftPackageReference "Yams" */;
+			productName = Yams;
+		};
+		AA01000000000000000000B4 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA01000000000000000000A4 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+		AA01000000000000000000B5 /* Sentry */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA01000000000000000000A5 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
+			productName = Sentry;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 4AAFDF772FAB3CAB006ABADC /* Project object */;
 }
