@@ -12,6 +12,8 @@
 		AA01000000000000000000C3 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B3 /* Yams */; };
 		AA01000000000000000000C4 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B4 /* Sparkle */; };
 		AA01000000000000000000C5 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B5 /* Sentry */; };
+		AA01000000000000000000C6 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B6 /* GRDB */; };
+		AA01000000000000000000C7 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = AA01000000000000000000B7 /* Yams */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -72,6 +74,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA01000000000000000000C6 /* GRDB in Frameworks */,
+				AA01000000000000000000C7 /* Yams in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -153,6 +157,8 @@
 			);
 			name = ExecaTests;
 			packageProductDependencies = (
+				AA01000000000000000000B6 /* GRDB */,
+				AA01000000000000000000B7 /* Yams */,
 			);
 			productName = ExecaTests;
 			productReference = 4AAFDF8C2FAB3CAF006ABADC /* ExecaTests.xctest */;
@@ -705,6 +711,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA01000000000000000000A5 /* XCRemoteSwiftPackageReference "sentry-cocoa" */;
 			productName = Sentry;
+		};
+		AA01000000000000000000B6 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA01000000000000000000A1 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+		AA01000000000000000000B7 /* Yams */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA01000000000000000000A3 /* XCRemoteSwiftPackageReference "Yams" */;
+			productName = Yams;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
