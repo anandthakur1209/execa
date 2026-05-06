@@ -21,6 +21,11 @@ struct SetupWizardView: View {
             footer
         }
         .padding(20)
+        .task {
+            if let saved = try? await coordinator.currentDisplayName(), !saved.isEmpty {
+                displayName = saved
+            }
+        }
     }
 
     private var header: some View {
