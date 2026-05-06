@@ -87,12 +87,21 @@ actor AudioCaptureService {
         await mic.stop()
         await system.stop()
 
-        // .savingMeeting covers the FLAC-encoding window. Phase 5's mixer call
-        // lands here; for now we transition through the state so the menu bar
-        // can show "Saving..." and tests can observe the lifecycle.
+        // .savingMeeting covers the FLAC-encoding window so the menu bar can
+        // show "Saving..." while AudioMixer runs (multi-second on a 1-hour
+        // meeting). The stop path swallows mixer errors — partial .wav files
+        // remain on disk so the meeting can be re-mixed later.
         state = .savingMeeting(meetingID: meetingID)
 
-        // FLAC encoding is wired in the next commit (AudioMixer).
+        let micURL = directory.appendingPathComponent("mic.wav")
+        let systemURL = directory.appendingPathComponent("system.wav")
+        let masterURL = directory.appendingPathComponent("master.flac")
+        do {
+            try AudioMixer.writeMasterFLAC(micWAV: micURL, systemWAV: systemURL, output: masterURL)
+        } catch {
+            // Logged via the row failing-soft path; the partial wavs remain
+            // valid for re-processing.
+        }
 
         let endedAt = Date()
         let audioPath = "meetings/\(meetingID)"

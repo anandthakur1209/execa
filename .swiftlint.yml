@@ -57,3 +57,10 @@ line_length:
   error: 160
   ignores_comments: true
   ignores_urls: true
+
+# "master" appears in audio-production contexts (master.flac, mastering, etc.)
+# distinct from the master/slave terminology the rule targets. Whitelisting
+# the term here rather than disabling the rule wholesale.
+inclusive_language:
+  override_allowed_terms:
+    - master

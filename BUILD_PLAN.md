@@ -119,10 +119,12 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 - `UI/SettingsView/PromptsPane.swift` — CRUD for templates.
 - `UI/MeetingHistoryView.swift` with FTS-backed search.
 - MOM exported as Markdown to `meetings/<id>/MOM.md`.
+- Per-source first-frame timestamp alignment in `AudioMixer.writeMasterFLAC` (cross-references the `// FIXME(phase-5)` in `Audio/AudioMixer.swift`). Phase 1 aligns from frame 0 of each source so any startup-latency difference between mic and system shows up as up to ~100 ms of lip-sync drift in `master.flac`. Fix: consult `PCMChunk.captureTime` and pad the lagging source's head with silence to align before mixing.
 
 **Acceptance:**
 - "End meeting" produces a non-empty MOM.md matching the configured template's structural shape.
 - History search returns hits across past meetings.
+- `master.flac` mix-down has no audible lip-sync drift between mic and system audio in History playback.
 
 ---
 
