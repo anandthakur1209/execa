@@ -8,7 +8,17 @@ actor AudioCaptureService {
     private let permissions: PermissionsService
     private let database: Database
 
-    private(set) var state: MeetingState = .idle
+    /// State transitions are emitted to subscribers as soon as they happen.
+    /// The menu bar binds its label and items off this stream.
+    nonisolated let stateStream: AsyncStream<MeetingState>
+    private nonisolated let stateContinuation: AsyncStream<MeetingState>.Continuation
+
+    private(set) var state: MeetingState = .idle {
+        didSet {
+            stateContinuation.yield(state)
+        }
+    }
+
     private var currentMeetingID: String?
     private var currentDirectory: URL?
 
@@ -22,6 +32,18 @@ actor AudioCaptureService {
         self.system = system
         self.permissions = permissions
         self.database = database
+        var capturedContinuation: AsyncStream<MeetingState>.Continuation?
+        let stream = AsyncStream<MeetingState>(bufferingPolicy: .bufferingNewest(8)) { cont in
+            capturedContinuation = cont
+        }
+        stateStream = stream
+        guard let continuation = capturedContinuation else {
+            preconditionFailure("AsyncStream did not yield continuation")
+        }
+        stateContinuation = continuation
+        // Seed subscribers with the initial idle state so the menu bar can
+        // render immediately on first observe.
+        continuation.yield(.idle)
     }
 
     @discardableResult

@@ -5,6 +5,7 @@ struct ExecaApp: App {
     @State private var coordinator: AppCoordinator?
     @State private var initError: String?
     @State private var firstRunComplete: Bool = false
+    @State private var meetingState: MeetingState = .idle
     @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some Scene {
@@ -25,10 +26,37 @@ struct ExecaApp: App {
                     let coord = try await AppCoordinator()
                     coordinator = coord
                     firstRunComplete = await (try? coord.isFirstRunComplete()) ?? false
+                    Task { await observeMeetingState(coord) }
                 } catch {
                     initError = String(describing: error)
                 }
             }
+        }
+
+        MenuBarExtra {
+            if let coordinator {
+                MenuBarMenu(
+                    state: meetingState,
+                    onStart: { Task { try? await coordinator.startMeeting() } },
+                    onStop: { Task { try? await coordinator.stopMeeting() } },
+                    onOpenScreenSettings: {
+                        Task { coordinator.permissions.openScreenRecordingSettings() }
+                    },
+                    onOpenMicSettings: {
+                        Task { coordinator.permissions.openMicrophoneSettings() }
+                    }
+                )
+            } else {
+                Text("execa is starting…")
+            }
+        } label: {
+            MenuBarLabel(state: meetingState)
+        }
+    }
+
+    private func observeMeetingState(_ coordinator: AppCoordinator) async {
+        for await newState in coordinator.audioCapture.stateStream {
+            meetingState = newState
         }
     }
 }
