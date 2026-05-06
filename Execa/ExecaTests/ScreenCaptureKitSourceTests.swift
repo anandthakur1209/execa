@@ -1,6 +1,6 @@
-@testable import Execa
 import AVFAudio
 import CoreGraphics
+@testable import Execa
 import Foundation
 import Testing
 
