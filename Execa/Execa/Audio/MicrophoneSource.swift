@@ -1,4 +1,4 @@
-import AVFAudio
+@preconcurrency import AVFAudio
 import Foundation
 
 enum MicrophoneSourceError: Error {
@@ -26,13 +26,13 @@ actor MicrophoneSource: AudioSource {
     private var configChangeObserver: NSObjectProtocol?
     private var archivalURL: URL?
 
-    nonisolated let sttStream: AsyncStream<AudioBuffer>
-    private nonisolated let sttContinuation: AsyncStream<AudioBuffer>.Continuation
+    nonisolated let sttStream: AsyncStream<PCMChunk>
+    private nonisolated let sttContinuation: AsyncStream<PCMChunk>.Continuation
 
     init(bufferSize: AVAudioFrameCount = 4096) {
         self.bufferSize = bufferSize
-        var continuation: AsyncStream<AudioBuffer>.Continuation?
-        let stream = AsyncStream<AudioBuffer>(bufferingPolicy: .bufferingNewest(64)) { cont in
+        var continuation: AsyncStream<PCMChunk>.Continuation?
+        let stream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
             continuation = cont
         }
         sttStream = stream
@@ -134,7 +134,7 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
     private let archivalFormat: AVAudioFormat
     private var archivalConverter: AVAudioConverter?
     private var sttResampler: AudioResampler
-    private let sttContinuation: AsyncStream<AudioBuffer>.Continuation
+    private let sttContinuation: AsyncStream<PCMChunk>.Continuation
     private var closed = false
 
     init(
@@ -142,7 +142,7 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
         archivalConverter: AVAudioConverter?,
         archivalFormat: AVAudioFormat,
         sttResampler: AudioResampler,
-        sttContinuation: AsyncStream<AudioBuffer>.Continuation
+        sttContinuation: AsyncStream<PCMChunk>.Continuation
     ) {
         self.archivalWriter = archivalWriter
         self.archivalConverter = archivalConverter
@@ -175,7 +175,7 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
         }
 
         if let sttBuffer = try? sttResampler.convert(buffer),
-           let audioBuffer = Self.audioBuffer(from: sttBuffer, source: .mic) {
+           let audioBuffer = Self.pcmChunk(from: sttBuffer, source: .mic) {
             sttContinuation.yield(audioBuffer)
         }
     }
@@ -212,11 +212,11 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
         return status == .error ? nil : output
     }
 
-    private static func audioBuffer(from buffer: AVAudioPCMBuffer, source: AudioBuffer.Source) -> AudioBuffer? {
+    private static func pcmChunk(from buffer: AVAudioPCMBuffer, source: PCMChunk.Source) -> PCMChunk? {
         guard let channelData = buffer.int16ChannelData else { return nil }
         let frameCount = Int(buffer.frameLength)
         guard frameCount > 0 else {
-            return AudioBuffer(
+            return PCMChunk(
                 source: source,
                 sampleRate: buffer.format.sampleRate,
                 channelCount: Int(buffer.format.channelCount),
@@ -230,7 +230,7 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
         for index in 0 ..< frameCount {
             samples[index] = pointer[index]
         }
-        return AudioBuffer(
+        return PCMChunk(
             source: source,
             sampleRate: buffer.format.sampleRate,
             channelCount: Int(buffer.format.channelCount),
