@@ -714,7 +714,7 @@
 		};
 		AA01000000000000000000B6 /* GRDB */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = AA01000000000000000000A1 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			package = AA01000000000000000000A1 /* XCRemoteSwiftPackageReference "GRDB" */;
 			productName = GRDB;
 		};
 		AA01000000000000000000B7 /* Yams */ = {
