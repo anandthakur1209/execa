@@ -1,6 +1,7 @@
 @preconcurrency import AVFAudio
 import CoreMedia
 import Foundation
+import os
 @preconcurrency import ScreenCaptureKit
 
 enum ScreenCaptureKitSourceError: Error {
@@ -9,6 +10,10 @@ enum ScreenCaptureKitSourceError: Error {
     case streamCreationFailed(Error)
     case startCaptureFailed(Error)
 }
+
+/// Low-rate diagnostic logger for SCStream callbacks. Filterable in
+/// Console.app via subsystem "com.anandthakur.execa" + category "audio.sck".
+private let sckLogger = Logger(subsystem: "com.anandthakur.execa", category: "audio.sck")
 
 actor ScreenCaptureKitSource: AudioSource {
     static let archivalFormat: AVAudioFormat = MicrophoneSource.archivalFormat
@@ -116,6 +121,9 @@ actor ScreenCaptureKitSource: AudioSource {
         if let scStream = stream {
             try? await scStream.stopCapture()
         }
+        if let output {
+            sckLogger.info("sck stream output total fires=\(output.totalFireCount(), privacy: .public)")
+        }
         tapHandler?.close()
         stream = nil
         output = nil
@@ -125,6 +133,11 @@ actor ScreenCaptureKitSource: AudioSource {
 
 final class SCKAudioOutput: NSObject, SCStreamOutput, @unchecked Sendable {
     private let handler: SCKTapHandler
+    private let counterLock = NSLock()
+    /// Diagnostic counter: incremented for every SCStream sample-buffer
+    /// delivery. If callbacks stop firing prematurely (the bug we're hunting),
+    /// this number caps out at 1 or 2.
+    private var fireCount = 0
 
     init(handler: SCKTapHandler) {
         self.handler = handler
@@ -132,7 +145,21 @@ final class SCKAudioOutput: NSObject, SCStreamOutput, @unchecked Sendable {
 
     func stream(_: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
+        counterLock.lock()
+        fireCount += 1
+        let count = fireCount
+        counterLock.unlock()
+        if count == 1 || count % 100 == 0 {
+            let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+            sckLogger.debug("sck audio fire #\(count, privacy: .public) frames=\(frames, privacy: .public)")
+        }
         handler.handle(sampleBuffer: sampleBuffer)
+    }
+
+    func totalFireCount() -> Int {
+        counterLock.lock()
+        defer { counterLock.unlock() }
+        return fireCount
     }
 }
 
@@ -146,6 +173,8 @@ final class SCKTapHandler: @unchecked Sendable {
     private var sttResampler: AudioResampler?
     private var lastInputFormat: AVAudioFormat?
     private var closed = false
+    private var handleCount = 0
+    private var writeCount = 0
 
     init(
         archivalWriter: AudioFileWriter,
@@ -160,13 +189,18 @@ final class SCKTapHandler: @unchecked Sendable {
     func close() {
         lock.lock()
         closed = true
+        let handles = handleCount
+        let writes = writeCount
         lock.unlock()
+        sckLogger.info("sck tap closing: total handles=\(handles, privacy: .public) writes=\(writes, privacy: .public)")
         archivalWriter.close()
         sttContinuation.finish()
     }
 
     func handle(sampleBuffer: CMSampleBuffer) {
         lock.lock()
+        handleCount += 1
+        let handles = handleCount
         if closed {
             lock.unlock()
             return
@@ -175,28 +209,65 @@ final class SCKTapHandler: @unchecked Sendable {
 
         guard let pcmBuffer = Self.makePCMBuffer(from: sampleBuffer) else { return }
 
-        lock.lock()
-        if lastInputFormat != pcmBuffer.format {
-            archivalConverter = AVAudioConverter(from: pcmBuffer.format, to: archivalFormat)
-            sttResampler = try? AudioResampler(inputFormat: pcmBuffer.format)
-            lastInputFormat = pcmBuffer.format
-        }
-        let archivalConverter = archivalConverter
-        let sttResampler = sttResampler
-        lock.unlock()
+        let (archivalConverter, sttResampler) = refreshConverters(for: pcmBuffer.format)
 
-        if let archivalConverter, let archivalBuffer = Self.convert(
-            buffer: pcmBuffer,
-            converter: archivalConverter,
-            outputFormat: archivalFormat
-        ) {
-            try? archivalWriter.write(archivalBuffer)
-        }
+        writeArchival(pcmBuffer: pcmBuffer, converter: archivalConverter, handles: handles)
 
         if let sttResampler,
            let sttBuffer = try? sttResampler.convert(pcmBuffer),
            let audioBuffer = Self.pcmChunk(from: sttBuffer, source: .system) {
             sttContinuation.yield(audioBuffer)
+        }
+    }
+
+    /// Lock-protected access to the per-input-format converter / resampler.
+    /// Recreates them when the incoming sample buffer's format changes
+    /// (rare in practice, but guards against device-config changes).
+    private func refreshConverters(for inputFormat: AVAudioFormat) -> (AVAudioConverter?, AudioResampler?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if lastInputFormat != inputFormat {
+            archivalConverter = AVAudioConverter(from: inputFormat, to: archivalFormat)
+            sttResampler = try? AudioResampler(inputFormat: inputFormat)
+            lastInputFormat = inputFormat
+        }
+        return (archivalConverter, sttResampler)
+    }
+
+    private func writeArchival(pcmBuffer: AVAudioPCMBuffer, converter: AVAudioConverter?, handles: Int) {
+        guard let converter, let archivalBuffer = Self.convert(
+            buffer: pcmBuffer,
+            converter: converter,
+            outputFormat: archivalFormat
+        ) else {
+            if handles == 1 {
+                let presence = converter != nil ? "present" : "nil"
+                sckLogger.warning("sck convert nil at handle #1 (converter=\(presence, privacy: .public))")
+            }
+            return
+        }
+        if handles == 1 {
+            let frames = pcmBuffer.frameLength
+            let rate = pcmBuffer.format.sampleRate
+            let channels = pcmBuffer.format.channelCount
+            let outFrames = archivalBuffer.frameLength
+            sckLogger.info(
+                """
+                sck first buffer inputFrames=\(frames, privacy: .public) \
+                inputRate=\(rate, privacy: .public) \
+                channels=\(channels, privacy: .public) \
+                outputFrames=\(outFrames, privacy: .public)
+                """
+            )
+        }
+        do {
+            try archivalWriter.write(archivalBuffer)
+            lock.lock()
+            writeCount += 1
+            lock.unlock()
+        } catch {
+            let description = String(describing: error)
+            sckLogger.error("sck archival write failed: \(description, privacy: .public)")
         }
     }
 
@@ -215,38 +286,20 @@ final class SCKTapHandler: @unchecked Sendable {
         }
         pcmBuffer.frameLength = frameCount
 
-        var blockBuffer: CMBlockBuffer?
-        var abl = AudioBufferList()
-        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        // Copy the sample buffer's PCM data directly into pcmBuffer's
+        // already-correctly-sized AudioBufferList. The previous implementation
+        // used a stack-allocated single-buffer AudioBufferList struct, which
+        // is undersized for non-interleaved multi-channel system audio (which
+        // is what SCStream typically delivers). The undersized list caused
+        // CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer to fail
+        // silently, dropping every buffer.
+        let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(
             sampleBuffer,
-            bufferListSizeNeededOut: nil,
-            bufferListOut: &abl,
-            bufferListSize: MemoryLayout<AudioBufferList>.size,
-            blockBufferAllocator: nil,
-            blockBufferMemoryAllocator: nil,
-            flags: 0,
-            blockBufferOut: &blockBuffer
+            at: 0,
+            frameCount: Int32(frameCount),
+            into: pcmBuffer.mutableAudioBufferList
         )
-        guard status == 0 else { return nil }
-
-        // The AudioBufferList we got back is a single-element struct in Swift
-        // (mNumberBuffers + mBuffers). For the multi-channel non-interleaved
-        // case its real layout is mBuffers as a flexible array. Walk it via
-        // unsafe pointer arithmetic and copy each channel into pcmBuffer.
-        let outList = pcmBuffer.mutableAudioBufferList
-        let inCount = Int(abl.mNumberBuffers)
-        let outCount = Int(outList.pointee.mNumberBuffers)
-        let inBuffers = withUnsafePointer(to: &abl.mBuffers) { ptr in
-            UnsafeBufferPointer(start: ptr, count: inCount)
-        }
-        let outBuffers = withUnsafeMutablePointer(to: &outList.pointee.mBuffers) { ptr in
-            UnsafeMutableBufferPointer(start: ptr, count: outCount)
-        }
-        for index in 0 ..< min(inCount, outCount) {
-            guard let src = inBuffers[index].mData, let dst = outBuffers[index].mData else { continue }
-            let bytes = Int(min(inBuffers[index].mDataByteSize, outBuffers[index].mDataByteSize))
-            dst.copyMemory(from: src, byteCount: bytes)
-        }
+        guard status == noErr else { return nil }
         return pcmBuffer
     }
 
@@ -262,9 +315,12 @@ final class SCKTapHandler: @unchecked Sendable {
         }
         var consumed = false
         var convError: NSError?
+        // See AudioResampler.convert(_:) for why we use `.noDataNow` instead
+        // of `.endOfStream` — `.endOfStream` permanently closes the converter
+        // and turns every subsequent buffer into a 0-frame no-op.
         let status = converter.convert(to: output, error: &convError) { _, statusOut in
             if consumed {
-                statusOut.pointee = .endOfStream
+                statusOut.pointee = .noDataNow
                 return nil
             }
             consumed = true

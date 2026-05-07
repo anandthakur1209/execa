@@ -46,9 +46,16 @@ struct AudioResampler {
 
         var consumed = false
         var convError: NSError?
+        // Signal `.noDataNow` (not `.endOfStream`) when we've handed the
+        // converter our single input buffer. `.endOfStream` permanently
+        // closes the converter's input stream, causing every subsequent
+        // `convert(to:)` call on the same instance to return zero frames.
+        // For a streaming pipeline that calls `convert(_:)` repeatedly with
+        // successive buffers, we need the converter to stay open and just
+        // wait for the next call.
         let status = converter.convert(to: output, error: &convError) { _, statusOut in
             if consumed {
-                statusOut.pointee = .endOfStream
+                statusOut.pointee = .noDataNow
                 return nil
             }
             consumed = true

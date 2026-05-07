@@ -146,4 +146,57 @@ struct AudioCaptureServiceTests {
 
         try? FileManager.default.removeItem(at: directory)
     }
+
+    /// Phase 1 regression test for "audio capture stops after one buffer".
+    /// Drives a stub source that opens AudioFileWriter and emits N synthetic
+    /// PCM buffers over ~1 second. Asserts the resulting `mic.wav` contains
+    /// at least 90% of the emitted frames — anything less means the writer
+    /// or the orchestrator's stop sequence is dropping buffers mid-flight.
+    /// The 10% tolerance covers the cancellation-window where the emitter
+    /// task may not have written its last few buffers before stop()
+    /// resolves.
+    @Test func continuousBufferEmissionLandsAllFrames() async throws {
+        let db = try Self.tempDB()
+        let permissions = PermissionsService()
+        guard await permissions.microphoneStatus() == .authorized,
+              permissions.screenRecordingStatus()
+        else { return }
+
+        let bufferCount = 100
+        let framesPerBuffer: AVAudioFrameCount = 480
+        let mic = WritingStubAudioSource(
+            bufferCount: bufferCount,
+            framesPerBuffer: framesPerBuffer,
+            intervalMs: 10
+        )
+        let system = WritingStubAudioSource(
+            bufferCount: bufferCount,
+            framesPerBuffer: framesPerBuffer,
+            intervalMs: 10
+        )
+        let service = AudioCaptureService(mic: mic, system: system, permissions: permissions, database: db)
+        let meetingID = ULID.generate()
+
+        let directory = try await service.start(meetingID: meetingID)
+        // 1.5 s gives the 100-buffer @ 10 ms cadence comfortable headroom to
+        // finish before we call stop().
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        _ = try await service.stop()
+
+        let micFile = try AVAudioFile(forReading: directory.appendingPathComponent("mic.wav"))
+        let systemFile = try AVAudioFile(forReading: directory.appendingPathComponent("system.wav"))
+
+        let expectedFrames = AVAudioFramePosition(bufferCount) * AVAudioFramePosition(framesPerBuffer)
+        let minimumFrames = AVAudioFramePosition(Double(expectedFrames) * 0.9)
+        #expect(
+            micFile.length >= minimumFrames,
+            "mic.wav frame count \(micFile.length) below 90% of expected \(expectedFrames)"
+        )
+        #expect(
+            systemFile.length >= minimumFrames,
+            "system.wav frame count \(systemFile.length) below 90% of expected \(expectedFrames)"
+        )
+
+        try? FileManager.default.removeItem(at: directory)
+    }
 }

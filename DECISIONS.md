@@ -117,6 +117,17 @@ The full reasoning lives in `meeting-app-spec.md`; this file is the index so Cla
 - **Why:** 48 kHz Int16 mono is the lowest-overhead format that doesn't lose meaningful fidelity for human speech (the dominant signal in a meeting recording), keeps file sizes ~1.5 MB/min FLAC per spec §10, and decouples the archive from any individual source's native quirks. Phase 5 history-view playback and Phase 4 LLM re-summarisation both depend on this contract being stable.
 - **Status:** Active.
 
+## 2026-05-07 — Phase 1 bug-fix: `AVAudioConverter` streaming uses `.noDataNow`, never `.endOfStream`
+
+- **Decision:** Every place we drive `AVAudioConverter.convert(to:error:withInputFrom:)` in a streaming pipeline (mic archival, SCK archival, `AudioResampler` STT) signals `.noDataNow` after handing over a single input buffer — never `.endOfStream`. The converter is reused across many calls; signalling `.endOfStream` permanently closes the converter's input stream and turns every subsequent `convert(to:)` into a 0-frame no-op.
+- **Why this matters:** Phase 1 manual smoke surfaced `mic.wav` of ~14 KB and `system.wav` of ~4 KB after multi-second recordings. The structurally-correct files contained only the very first buffer's worth of frames. Diagnostic counters proved the source callbacks kept firing — every subsequent buffer went through `convert()`, but `output.frameLength` was 0. The bug was in the converter's input-block contract: `.endOfStream` is for stream termination, `.noDataNow` is for "I'll provide more later." The streaming-friendly signal preserves converter state between calls.
+- **Trade-off:** With `.noDataNow`, the converter holds ~50–100 ms of trailing frames internally to feed its filter taps on the next call. In a meeting those frames flow out via the next buffer; only the last <100 ms of the final input buffer at meeting end is unrecoverable. Tests assert tolerance (±1600 frames @ 16 kHz = ~100 ms) on a single-buffer conversion that mirrors this trailing-frame behaviour.
+- **Other Phase 1 bugs landed in the same fix commit** (recorded here so we don't re-litigate):
+  - **`SCKTapHandler.makePCMBuffer`**: replaced the manually-walked, single-buffer `AudioBufferList` with `CMSampleBufferCopyPCMDataIntoAudioBufferList` writing into `pcmBuffer.mutableAudioBufferList`. The old form was undersized for SCStream's stereo non-interleaved system audio and silently dropped every buffer (and hence every write) at extraction time.
+  - **`Execa.entitlements`**: added the `com.apple.security.exception.mach-lookup.global-name` exception for `com.apple.audioanalyticsd`. AVAudioEngine on a sandboxed macOS 14 app prints `[carc] PRECONDITION FAILURE: Process is sandboxed but ... doesn't contain 'com.apple.audioanalyticsd'` on every start. The exception is narrow (one named service), is the standard fix in Apple developer forum threads, and does not weaken `library-validation` or `app-sandbox`. CLAUDE.md's "no `allow-jit`, no `disable-library-validation`" rule is preserved.
+- **Regression-test coverage:** `MicrophoneSourceTests.capturesAudioToWAV` and `ScreenCaptureKitSourceTests.capturesSystemAudioToWAV` now assert frame-count floors (60% and 50% of expected) instead of `> 0`. New `AudioCaptureServiceTests.continuousBufferEmissionLandsAllFrames` drives a `WritingStubAudioSource` that emits 100 PCM buffers over 1 s and asserts the file contains ≥ 90% of them — catches writer-side and orchestrator-side regressions without needing real CoreAudio permissions.
+- **Status:** Active.
+
 ---
 
 ## How to add an entry

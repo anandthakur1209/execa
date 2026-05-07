@@ -39,9 +39,17 @@ struct AudioResamplerTests {
         #expect(output.format.channelCount == 1)
         #expect(output.format.commonFormat == .pcmFormatInt16)
 
+        // AudioResampler is built for streaming use: it signals `.noDataNow`
+        // (not `.endOfStream`) when handed each input buffer, so the
+        // underlying AVAudioConverter holds ~50–100 ms of trailing frames
+        // internally to feed its filter taps on the next call. In a meeting,
+        // those frames flow out via the subsequent buffer; only the last
+        // <100 ms of the final input buffer is unrecoverable. This test feeds
+        // a single 1 s input buffer, so we tolerate up to ~100 ms (1600
+        // frames @ 16 kHz) of trailing-side drift.
         let expectedFrames = Int(Double(inputFrameCount) * outputRate / inputRate)
         let actualFrames = Int(output.frameLength)
         let delta = abs(actualFrames - expectedFrames)
-        #expect(delta <= 64, "frame count drift \(delta) too large for 1-second sine")
+        #expect(delta <= 1600, "frame count drift \(delta) too large for 1-second sine")
     }
 }

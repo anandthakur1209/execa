@@ -1,11 +1,17 @@
 @preconcurrency import AVFAudio
 import Foundation
+import os
 
 enum MicrophoneSourceError: Error {
     case alreadyStarted
     case engineStartFailed(Error)
     case formatUnavailable
 }
+
+/// Low-rate diagnostic logger: tap-fire totals and AVAudioEngine
+/// configuration-change traces. Filterable in Console.app via subsystem
+/// "com.anandthakur.execa" + category "audio.mic".
+private let micLogger = Logger(subsystem: "com.anandthakur.execa", category: "audio.mic")
 
 actor MicrophoneSource: AudioSource {
     static let archivalFormat: AVAudioFormat = {
@@ -65,26 +71,7 @@ actor MicrophoneSource: AudioSource {
             throw MicrophoneSourceError.formatUnavailable
         }
 
-        let errorContinuation = errorContinuation
-        let writer = try AudioFileWriter(
-            url: archivalURL,
-            format: Self.archivalFormat,
-            onError: { error in
-                if error == .diskFull {
-                    errorContinuation.yield(.diskFull)
-                }
-            }
-        )
-        let archivalConverter = AVAudioConverter(from: inputFormat, to: Self.archivalFormat)
-        let sttResampler = try AudioResampler(inputFormat: inputFormat)
-
-        let handler = MicrophoneTapHandler(
-            archivalWriter: writer,
-            archivalConverter: archivalConverter,
-            archivalFormat: Self.archivalFormat,
-            sttResampler: sttResampler,
-            sttContinuation: sttContinuation
-        )
+        let handler = try makeTapHandler(archivalURL: archivalURL, inputFormat: inputFormat)
         tapHandler = handler
 
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { buffer, time in
@@ -101,6 +88,41 @@ actor MicrophoneSource: AudioSource {
         }
         self.engine = engine
 
+        let rate = inputFormat.sampleRate
+        let channels = inputFormat.channelCount
+        micLogger.info(
+            """
+            mic engine started, inputFormat \
+            sampleRate=\(rate, privacy: .public) \
+            channels=\(channels, privacy: .public)
+            """
+        )
+        installConfigurationChangeObserver(engine: engine)
+    }
+
+    private func makeTapHandler(archivalURL: URL, inputFormat: AVAudioFormat) throws -> MicrophoneTapHandler {
+        let errorContinuation = errorContinuation
+        let writer = try AudioFileWriter(
+            url: archivalURL,
+            format: Self.archivalFormat,
+            onError: { error in
+                if error == .diskFull {
+                    errorContinuation.yield(.diskFull)
+                }
+            }
+        )
+        let archivalConverter = AVAudioConverter(from: inputFormat, to: Self.archivalFormat)
+        let sttResampler = try AudioResampler(inputFormat: inputFormat)
+        return MicrophoneTapHandler(
+            archivalWriter: writer,
+            archivalConverter: archivalConverter,
+            archivalFormat: Self.archivalFormat,
+            sttResampler: sttResampler,
+            sttContinuation: sttContinuation
+        )
+    }
+
+    private func installConfigurationChangeObserver(engine: AVAudioEngine) {
         configChangeObserver = NotificationCenter.default.addObserver(
             forName: NSNotification.Name.AVAudioEngineConfigurationChange,
             object: engine,
@@ -108,6 +130,7 @@ actor MicrophoneSource: AudioSource {
         ) { [weak self] _ in
             // expected gap on device hot-swap: ~1 buffer is dropped while we
             // tear the tap down and rebuild for the new input format.
+            micLogger.info("AVAudioEngineConfigurationChange notification observed")
             Task { [weak self] in await self?.handleConfigurationChange() }
         }
     }
@@ -128,15 +151,33 @@ actor MicrophoneSource: AudioSource {
     }
 
     private func handleConfigurationChange() async {
-        guard let engine, let handler = tapHandler else { return }
+        guard let engine, let handler = tapHandler else {
+            micLogger.warning("config change: engine or handler nil, skipping")
+            return
+        }
         let inputNode = engine.inputNode
         engine.stop()
         inputNode.removeTap(onBus: 0)
 
         let newFormat = inputNode.outputFormat(forBus: 0)
-        guard newFormat.sampleRate > 0 else { return }
+        let newRate = newFormat.sampleRate
+        let newChannels = newFormat.channelCount
+        micLogger.info(
+            """
+            config change: newFormat \
+            sampleRate=\(newRate, privacy: .public) \
+            channels=\(newChannels, privacy: .public)
+            """
+        )
+        guard newFormat.sampleRate > 0 else {
+            micLogger.warning("config change: degenerate sampleRate, ABORTING WITHOUT RESTART")
+            return
+        }
         let newArchivalConverter = AVAudioConverter(from: newFormat, to: Self.archivalFormat)
-        guard let newSttResampler = try? AudioResampler(inputFormat: newFormat) else { return }
+        guard let newSttResampler = try? AudioResampler(inputFormat: newFormat) else {
+            micLogger.error("config change: resampler init failed, ABORTING WITHOUT RESTART")
+            return
+        }
         handler.update(archivalConverter: newArchivalConverter, sttResampler: newSttResampler)
 
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: newFormat) { buffer, time in
@@ -157,6 +198,13 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
     private var sttResampler: AudioResampler
     private let sttContinuation: AsyncStream<PCMChunk>.Continuation
     private var closed = false
+
+    // Diagnostic counters (read under `lock`). Tap callbacks are the source of
+    // truth for "did the audio thread keep firing?" — we surface totals at
+    // close() so a regression where the tap dies after one buffer is
+    // immediately visible in Console.app.
+    private var fireCount = 0
+    private var writeCount = 0
 
     init(
         archivalWriter: AudioFileWriter,
@@ -181,18 +229,34 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
 
     func handle(buffer: AVAudioPCMBuffer, time _: AVAudioTime) {
         lock.lock()
+        fireCount += 1
+        let count = fireCount
         let archivalConverter = archivalConverter
         let sttResampler = sttResampler
         let isClosed = closed
         lock.unlock()
         guard !isClosed else { return }
 
+        if count == 1 || count % 100 == 0 {
+            micLogger.debug("mic tap fire #\(count, privacy: .public) frames=\(buffer.frameLength, privacy: .public)")
+        }
+
         if let archivalConverter, let archivalBuffer = Self.convert(
             buffer: buffer,
             converter: archivalConverter,
             outputFormat: archivalFormat
         ) {
-            try? archivalWriter.write(archivalBuffer)
+            do {
+                try archivalWriter.write(archivalBuffer)
+                lock.lock()
+                writeCount += 1
+                lock.unlock()
+            } catch {
+                let description = String(describing: error)
+                micLogger.error(
+                    "mic archival write failed at fire #\(count, privacy: .public): \(description, privacy: .public)"
+                )
+            }
         }
 
         if let sttBuffer = try? sttResampler.convert(buffer),
@@ -204,7 +268,10 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
     func close() {
         lock.lock()
         closed = true
+        let fires = fireCount
+        let writes = writeCount
         lock.unlock()
+        micLogger.info("mic tap closing: total fires=\(fires, privacy: .public) writes=\(writes, privacy: .public)")
         archivalWriter.close()
         sttContinuation.finish()
     }
@@ -221,9 +288,12 @@ final nonisolated class MicrophoneTapHandler: @unchecked Sendable {
         }
         var consumed = false
         var convError: NSError?
+        // See AudioResampler.convert(_:) for why we use `.noDataNow` instead
+        // of `.endOfStream` — `.endOfStream` permanently closes the converter
+        // and turns every subsequent buffer into a 0-frame no-op.
         let status = converter.convert(to: output, error: &convError) { _, statusOut in
             if consumed {
-                statusOut.pointee = .endOfStream
+                statusOut.pointee = .noDataNow
                 return nil
             }
             consumed = true
