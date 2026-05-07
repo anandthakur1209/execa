@@ -128,6 +128,13 @@ The full reasoning lives in `meeting-app-spec.md`; this file is the index so Cla
 - **Regression-test coverage:** `MicrophoneSourceTests.capturesAudioToWAV` and `ScreenCaptureKitSourceTests.capturesSystemAudioToWAV` now assert frame-count floors (60% and 50% of expected) instead of `> 0`. New `AudioCaptureServiceTests.continuousBufferEmissionLandsAllFrames` drives a `WritingStubAudioSource` that emits 100 PCM buffers over 1 s and asserts the file contains ≥ 90% of them — catches writer-side and orchestrator-side regressions without needing real CoreAudio permissions.
 - **Status:** Active.
 
+## 2026-05-07 — Phase 1 closeout: acoustic echo cancellation deferred
+
+- **Decision:** Phase 1 audio capture assumes headphones use; speaker mode produces echo bleed in `mic.wav`. Voice Processing IO via `kAUVoiceProcessingIO` is the standard fix (used by Zoom/Meet) but adds latency, may conflict with concurrent SCK capture, and isn't needed for the headphones use case. Revisit if user testing surfaces speaker-mode as a real workflow.
+- **Why:** Phase 1 manual smoke confirmed correct two-stream capture when the user is on headphones — `mic.wav` has only the user's voice, `system.wav` has only remote/system audio, `master.flac` mixes the two cleanly. With built-in speakers, remote audio plays into the room and the mic re-captures it; the same speech then appears in both archives and would yield doubled transcript entries in Phase 2 (mic-stream tagged as "You", system-stream correctly diarized). This is acoustic physics, not a Phase 1 capture bug. AEC adds complexity (Voice Processing IO renegotiates the input audio format, may interact poorly with `AVAudioEngineConfigurationChange`, and adds 20–40 ms of latency) for a use case the product does not target.
+- **Mitigation if it becomes blocking:** Switch the mic input from a raw `AVAudioEngine` tap to `kAUVoiceProcessingIO` (an audio unit), or wait for the macOS 15+ `SCStream.captureMicrophone` path which routes mic through SCK and avoids the dual-engine collision entirely.
+- **Status:** Parked.
+
 ---
 
 ## How to add an entry

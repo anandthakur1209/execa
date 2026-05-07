@@ -144,6 +144,7 @@ A native macOS application that sits in the menu bar, records both microphone an
 - A **mixed master** is also recorded to `meeting_<id>.flac` for archival and re-processing.
 - Output device changes (AirPods connect/disconnect) handled via `AVAudioEngine` configuration-change notifications — capture is restarted seamlessly without ending the meeting.
 - VAD / silence trim: optional, off by default for v1.
+- The two-stream architecture assumes the user is wearing headphones during meetings. When the user uses built-in speakers, system audio bleeds acoustically into the mic stream, producing duplicated audio in `master.flac` and (in Phase 2) duplicated transcription. Acoustic echo cancellation via Voice Processing IO is deferred to a future phase — see `DECISIONS.md`.
 
 #### Permissions required at first launch
 - Microphone (`NSMicrophoneUsageDescription`)

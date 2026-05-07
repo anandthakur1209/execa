@@ -66,6 +66,9 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 - `UI/LiveMeetingView.swift` — interim italics, finalized normal weight; speaker prefix shows raw `Speaker N`.
 - Auto-reconnect with exponential backoff; 30 s ring buffer flushed on reconnect.
 
+**Known consequence (carried over from Phase 1 closeout):**
+- In speaker-mode (no headphones), mic-stream STT will transcribe remote-participant audio bleeding through speakers and tag it as "You". The same audio also arrives via system-stream STT correctly tagged with diarization. Result: doubled transcript entries in speaker mode. Mitigation deferred (see `DECISIONS.md` 2026-05-07 Phase 1 closeout).
+
 **Acceptance:**
 - Live transcript displays within 2 s of first speech.
 - Network drop mid-meeting → banner appears, audio buffered, transcript catches up on reconnect.
