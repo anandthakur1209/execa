@@ -28,18 +28,30 @@ actor MicrophoneSource: AudioSource {
 
     nonisolated let sttStream: AsyncStream<PCMChunk>
     private nonisolated let sttContinuation: AsyncStream<PCMChunk>.Continuation
+    nonisolated let errorStream: AsyncStream<MeetingError>
+    private nonisolated let errorContinuation: AsyncStream<MeetingError>.Continuation
 
     init(bufferSize: AVAudioFrameCount = 4096) {
         self.bufferSize = bufferSize
-        var continuation: AsyncStream<PCMChunk>.Continuation?
-        let stream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
-            continuation = cont
+        var sttCont: AsyncStream<PCMChunk>.Continuation?
+        let sttStream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
+            sttCont = cont
         }
-        sttStream = stream
-        guard let captured = continuation else {
+        self.sttStream = sttStream
+        guard let sttCaptured = sttCont else {
             preconditionFailure("AsyncStream did not yield continuation")
         }
-        sttContinuation = captured
+        sttContinuation = sttCaptured
+
+        var errCont: AsyncStream<MeetingError>.Continuation?
+        let errStream = AsyncStream<MeetingError>(bufferingPolicy: .bufferingNewest(8)) { cont in
+            errCont = cont
+        }
+        errorStream = errStream
+        guard let errCaptured = errCont else {
+            preconditionFailure("AsyncStream did not yield continuation")
+        }
+        errorContinuation = errCaptured
     }
 
     func start(archivalURL: URL) async throws {
@@ -53,7 +65,16 @@ actor MicrophoneSource: AudioSource {
             throw MicrophoneSourceError.formatUnavailable
         }
 
-        let writer = try AudioFileWriter(url: archivalURL, format: Self.archivalFormat)
+        let errorContinuation = errorContinuation
+        let writer = try AudioFileWriter(
+            url: archivalURL,
+            format: Self.archivalFormat,
+            onError: { error in
+                if error == .diskFull {
+                    errorContinuation.yield(.diskFull)
+                }
+            }
+        )
         let archivalConverter = AVAudioConverter(from: inputFormat, to: Self.archivalFormat)
         let sttResampler = try AudioResampler(inputFormat: inputFormat)
 

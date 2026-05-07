@@ -25,8 +25,14 @@ enum AudioFileWriterError: Error, Equatable {
 final nonisolated class AudioFileWriter: @unchecked Sendable {
     private let lock = NSLock()
     private var file: AVAudioFile?
+    private let onError: (@Sendable (AudioFileWriterError) -> Void)?
 
-    init(url: URL, format: AVAudioFormat) throws {
+    init(
+        url: URL,
+        format: AVAudioFormat,
+        onError: (@Sendable (AudioFileWriterError) -> Void)? = nil
+    ) throws {
+        self.onError = onError
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: format.sampleRate,
@@ -55,7 +61,9 @@ final nonisolated class AudioFileWriter: @unchecked Sendable {
         do {
             try file.write(from: buffer)
         } catch {
-            throw AudioFileWriterError.mapping(error)
+            let mapped = AudioFileWriterError.mapping(error)
+            onError?(mapped)
+            throw mapped
         }
     }
 

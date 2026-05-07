@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -55,9 +56,32 @@ struct ExecaApp: App {
     }
 
     private func observeMeetingState(_ coordinator: AppCoordinator) async {
+        var lastDiskFullAlertShown = false
         for await newState in coordinator.audioCapture.stateStream {
             meetingState = newState
+            if case .error(.diskFull) = newState, !lastDiskFullAlertShown {
+                lastDiskFullAlertShown = true
+                await MainActor.run { Self.showDiskFullAlert() }
+            }
+            if case .error(.diskFull) = newState {
+                // keep flag set until we leave the error state
+            } else {
+                lastDiskFullAlertShown = false
+            }
         }
+    }
+
+    private static func showDiskFullAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Recording paused: disk full"
+        alert.informativeText = """
+        execa stopped recording because there's no space left on the disk. Free \
+        some space and start a new meeting. The audio captured so far has been \
+        saved to the meetings folder.
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
 

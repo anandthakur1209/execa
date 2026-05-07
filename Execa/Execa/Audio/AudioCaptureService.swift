@@ -21,6 +21,7 @@ actor AudioCaptureService {
 
     private var currentMeetingID: String?
     private var currentDirectory: URL?
+    private var errorObservationTask: Task<Void, Never>?
 
     init(
         mic: AudioSource,
@@ -96,7 +97,39 @@ actor AudioCaptureService {
         }
 
         state = .recording(meetingID: meetingID, startedAt: startedAt)
+        startErrorObservation()
         return directory
+    }
+
+    private func startErrorObservation() {
+        errorObservationTask?.cancel()
+        let mic = mic
+        let system = system
+        errorObservationTask = Task { [weak self] in
+            await withTaskGroup(of: MeetingError?.self) { group in
+                group.addTask { for await err in mic.errorStream {
+                    return err
+                }; return nil }
+                group.addTask { for await err in system.errorStream {
+                    return err
+                }; return nil }
+                if let firstError = await group.next(), let firstError {
+                    group.cancelAll()
+                    await self?.handleSourceError(firstError)
+                }
+            }
+        }
+    }
+
+    private func handleSourceError(_ error: MeetingError) async {
+        guard case let .recording(meetingID, _) = state else { return }
+        // Stop both sources cleanly so partially-written .wavs remain valid.
+        await mic.stop()
+        await system.stop()
+        try? await markFailedRow(meetingID: meetingID)
+        currentMeetingID = nil
+        currentDirectory = nil
+        state = .error(error)
     }
 
     @discardableResult
@@ -104,6 +137,8 @@ actor AudioCaptureService {
         guard case let .recording(meetingID, _) = state, let directory = currentDirectory else {
             return nil
         }
+        errorObservationTask?.cancel()
+        errorObservationTask = nil
         state = .stopping
 
         await mic.stop()

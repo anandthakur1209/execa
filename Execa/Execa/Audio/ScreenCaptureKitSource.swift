@@ -19,52 +19,37 @@ actor ScreenCaptureKitSource: AudioSource {
 
     nonisolated let sttStream: AsyncStream<PCMChunk>
     private nonisolated let sttContinuation: AsyncStream<PCMChunk>.Continuation
+    nonisolated let errorStream: AsyncStream<MeetingError>
+    private nonisolated let errorContinuation: AsyncStream<MeetingError>.Continuation
 
     init() {
-        var continuation: AsyncStream<PCMChunk>.Continuation?
-        let stream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
-            continuation = cont
+        var sttCont: AsyncStream<PCMChunk>.Continuation?
+        let sttStream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
+            sttCont = cont
         }
-        sttStream = stream
-        guard let captured = continuation else {
+        self.sttStream = sttStream
+        guard let sttCaptured = sttCont else {
             preconditionFailure("AsyncStream did not yield continuation")
         }
-        sttContinuation = captured
+        sttContinuation = sttCaptured
+
+        var errCont: AsyncStream<MeetingError>.Continuation?
+        let errStream = AsyncStream<MeetingError>(bufferingPolicy: .bufferingNewest(8)) { cont in
+            errCont = cont
+        }
+        errorStream = errStream
+        guard let errCaptured = errCont else {
+            preconditionFailure("AsyncStream did not yield continuation")
+        }
+        errorContinuation = errCaptured
     }
 
     func start(archivalURL: URL) async throws {
         guard stream == nil else { throw ScreenCaptureKitSourceError.alreadyStarted }
-
-        let content: SCShareableContent
-        do {
-            content = try await SCShareableContent.current
-        } catch {
-            throw ScreenCaptureKitSourceError.streamCreationFailed(error)
-        }
-        guard let display = content.displays.first else {
-            throw ScreenCaptureKitSourceError.noDisplays
-        }
-        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
-
-        let config = SCStreamConfiguration()
-        config.capturesAudio = true
-        config.excludesCurrentProcessAudio = true
-        // Video frames are unused for audio-only capture; minimise their cost.
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-        config.width = 2
-        config.height = 2
-
-        let writer = try AudioFileWriter(url: archivalURL, format: Self.archivalFormat)
-        let handler = SCKTapHandler(
-            archivalWriter: writer,
-            archivalFormat: Self.archivalFormat,
-            sttContinuation: sttContinuation
-        )
-
-        let scStream: SCStream
-        do {
-            scStream = SCStream(filter: filter, configuration: config, delegate: nil)
-        }
+        let filter = try await Self.contentFilter()
+        let config = Self.streamConfiguration()
+        let handler = try makeTapHandler(archivalURL: archivalURL)
+        let scStream = SCStream(filter: filter, configuration: config, delegate: nil)
         let output = SCKAudioOutput(handler: handler)
         do {
             try scStream.addStreamOutput(
@@ -76,17 +61,55 @@ actor ScreenCaptureKitSource: AudioSource {
             handler.close()
             throw ScreenCaptureKitSourceError.streamCreationFailed(error)
         }
-
         do {
             try await scStream.startCapture()
         } catch {
             handler.close()
             throw ScreenCaptureKitSourceError.startCaptureFailed(error)
         }
-
         stream = scStream
         self.output = output
         tapHandler = handler
+    }
+
+    private func makeTapHandler(archivalURL: URL) throws -> SCKTapHandler {
+        let errorContinuation = errorContinuation
+        let writer = try AudioFileWriter(
+            url: archivalURL,
+            format: Self.archivalFormat,
+            onError: { error in
+                if error == .diskFull { errorContinuation.yield(.diskFull) }
+            }
+        )
+        return SCKTapHandler(
+            archivalWriter: writer,
+            archivalFormat: Self.archivalFormat,
+            sttContinuation: sttContinuation
+        )
+    }
+
+    private static func contentFilter() async throws -> SCContentFilter {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.current
+        } catch {
+            throw ScreenCaptureKitSourceError.streamCreationFailed(error)
+        }
+        guard let display = content.displays.first else {
+            throw ScreenCaptureKitSourceError.noDisplays
+        }
+        return SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+    }
+
+    private static func streamConfiguration() -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        config.excludesCurrentProcessAudio = true
+        // Video frames are unused for audio-only capture; minimise their cost.
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        config.width = 2
+        config.height = 2
+        return config
     }
 
     func stop() async {

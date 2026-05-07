@@ -7,6 +7,8 @@ import Foundation
 actor StubAudioSource: AudioSource {
     nonisolated let sttStream: AsyncStream<PCMChunk>
     private nonisolated let continuation: AsyncStream<PCMChunk>.Continuation
+    nonisolated let errorStream: AsyncStream<MeetingError>
+    private nonisolated let errorContinuation: AsyncStream<MeetingError>.Continuation
 
     let shouldThrowOnStart: Bool
     private(set) var didStart = false
@@ -15,13 +17,26 @@ actor StubAudioSource: AudioSource {
 
     init(shouldThrowOnStart: Bool = false) {
         self.shouldThrowOnStart = shouldThrowOnStart
-        var captured: AsyncStream<PCMChunk>.Continuation?
-        let stream = AsyncStream<PCMChunk> { cont in captured = cont }
+        var sttCont: AsyncStream<PCMChunk>.Continuation?
+        let stream = AsyncStream<PCMChunk> { cont in sttCont = cont }
         sttStream = stream
-        guard let cont = captured else {
+        guard let sttCaptured = sttCont else {
             preconditionFailure("AsyncStream did not yield continuation")
         }
-        continuation = cont
+        continuation = sttCaptured
+
+        var errCont: AsyncStream<MeetingError>.Continuation?
+        let errStream = AsyncStream<MeetingError> { cont in errCont = cont }
+        errorStream = errStream
+        guard let errCaptured = errCont else {
+            preconditionFailure("AsyncStream did not yield continuation")
+        }
+        errorContinuation = errCaptured
+    }
+
+    /// Test-only hook to simulate a write error reaching the source.
+    nonisolated func emitError(_ error: MeetingError) {
+        errorContinuation.yield(error)
     }
 
     func start(archivalURL: URL) async throws {
@@ -35,5 +50,6 @@ actor StubAudioSource: AudioSource {
     func stop() async {
         didStop = true
         continuation.finish()
+        errorContinuation.finish()
     }
 }

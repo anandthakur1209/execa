@@ -94,6 +94,38 @@ struct AudioCaptureServiceTests {
         #expect(row?.status == "failed")
     }
 
+    @Test func diskFullErrorTransitionsState() async throws {
+        let db = try Self.tempDB()
+        let permissions = PermissionsService()
+        guard await permissions.microphoneStatus() == .authorized,
+              permissions.screenRecordingStatus()
+        else { return }
+
+        let mic = StubAudioSource()
+        let system = StubAudioSource()
+        let service = AudioCaptureService(mic: mic, system: system, permissions: permissions, database: db)
+        let meetingID = ULID.generate()
+
+        let directory = try await service.start(meetingID: meetingID)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        mic.emitError(.diskFull)
+
+        // Allow the observation task to drain.
+        for _ in 0 ..< 20 {
+            if case .error(.diskFull) = await service.state { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        if case .error(.diskFull) = await service.state {
+            // ok
+        } else {
+            await Issue.record("expected service.state to transition to .error(.diskFull); got \(service.state)")
+        }
+
+        let row = try await Self.meetingsRow(db, id: meetingID)
+        #expect(row?.status == "failed")
+    }
+
     @Test func emptyMeetingDoesNotCrash() async throws {
         let db = try Self.tempDB()
         let permissions = PermissionsService()
