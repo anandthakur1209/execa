@@ -8,7 +8,7 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 
 ## Current status
 
-**Pre-implementation.** The repo contains the spec (`meeting-app-spec.md`), `CLAUDE.md`, `DECISIONS.md`, and this file. No source code, no `Execa.xcodeproj`, no `Package.swift`. Next step: Phase 0.
+**Phase 1 complete (tagged `phase-1`).** Phase 0 (project scaffold + persistence) and Phase 1 (audio capture + archival) are landed end-to-end. The app captures mic + system audio in parallel from the menu bar, archives `mic.wav` and `system.wav` per source, and post-processes a downmixed `master.flac` at stop, all under the sandbox container. Permission gating, source-startup atomicity, AirPods hot-swap reattach, empty-meeting tolerance, and disk-full graceful pause are wired. Next step: Phase 2.
 
 ---
 
