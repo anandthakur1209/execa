@@ -1,0 +1,12 @@
+{
+  "type": "data",
+  "data": {
+    "request_id": "phase2-fixture-0001",
+    "transcript": "hello, this is a phase 2 transcription test",
+    "language_code": "en-IN",
+    "metrics": {
+      "audio_duration": 2.45,
+      "processing_latency": 0.82
+    }
+  }
+}

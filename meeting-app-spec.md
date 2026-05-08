@@ -156,29 +156,32 @@ A native macOS application that sits in the menu bar, records both microphone an
 - Two persistent WebSocket connections to the active provider (one per stream: mic, system).
 - The active provider is selected by the routing logic in §3.3. Both Sarvam and Deepgram adapters conform to a shared `TranscriptionProvider` protocol that emits the same normalized event shape, so the rest of the app is provider-agnostic.
 
-#### Sarvam Saaras V3 (default for Hinglish meetings)
-- Endpoint (illustrative, refer to current Sarvam docs at build time):
-  `wss://api.sarvam.ai/speech-to-text/ws?model=saaras:v3&language=hi-en&diarization=true&interim_results=true&word_timestamps=true&vad_events=true`
-- `language=hi-en` enables auto-detect across Hindi + English with code-switch handling. For other Indic languages, set accordingly (e.g. `mr-en`, `ta-en`, `gu-en`).
-- **Both** mic and system streams use `diarization=true`. Multi-person in-room meetings around one MacBook (especially hybrid setups: in-room participants + remote participants via Zoom) are first-class — the mic stream may legitimately carry several speakers, and the diarizer disentangles them. See `DECISIONS.md` 2026-05-08 entry "Phase 2: mic stream is now diarized too."
-- Audio format: 16-bit PCM, 16 kHz mono.
+#### Sarvam Saarika (default for Hinglish meetings)
+- Endpoint: `wss://api.sarvam.ai/speech-to-text/ws?language-code=<code>&model=saarika:v2.5`
+- Auth: `api-subscription-key: <key>` request header on the WebSocket upgrade.
+- `language-code` examples: `en-IN`, `hi-IN`, `ta-IN`. (The HinglishGet "auto-detect" wording in earlier drafts was illustrative; Sarvam streaming sets language per-connection.)
+- Audio framing on the wire: JSON message per chunk: `{"audio": {"data": "<base64-encoded raw 16-bit PCM>", "encoding": "audio/wav", "sample_rate": 16000}}`. **Not raw binary.**
+- **Streaming STT does not support speaker diarization** — diarization is batch-only on the Sarvam API. Both mic and system stream connections collapse all received text into a single speaker ID (0). Speaker labels are assigned via post-hoc batch diarization at meeting-stop; see `DECISIONS.md` 2026-05-08 "Path B" entry.
+- Audio format: 16-bit PCM, 16 kHz mono. The `Saaras` family endpoint at `wss://api.sarvam.ai/speech-to-text-translate/ws/{key}` is the *translation* endpoint, not transcription — execa uses Saarika for transcript-fidelity reasons (Devanagari output for Hindi speech, vs. English-translated for Saaras).
 
 #### Deepgram Nova-3 multilingual (English-heavy / fallback)
 - Endpoint:
   `wss://api.deepgram.com/v1/listen?model=nova-3&language=multi&diarize=true&punctuate=true&interim_results=true&vad_events=true&endpointing=300&smart_format=true&utterances=true`
 - `language=multi` enables Deepgram's 10-language code-switching mode (English + Hindi + 8 others).
-- Both streams use `diarize=true`, matching the Sarvam path (see above).
+- Deepgram supports streaming diarization, unlike Sarvam — when the router picks Deepgram, both streams set `diarize=true` and live transcript carries diarized speaker IDs without needing the post-hoc batch step. This is one reason Deepgram is the failover-of-choice for sessions where live speaker labels matter more than Sarvam's Hinglish accuracy advantage.
 
 #### Common event handling (provider-agnostic)
 - Receive events:
   - Interim results with `is_final=false` → rendered in italic/grey in the transcript view.
   - On `is_final=true` (Deepgram) / equivalent finalized event (Sarvam), commit to the transcript store and trigger any pending UI scroll.
-- Each normalized transcript token carries: `start_ms`, `end_ms`, `confidence`, `speaker_id` (now meaningful for both mic and system, since both are diarized), `source` (mic / system), `language` (when provider returns it — Sarvam emits per-word language tags for code-switched audio), `meeting_id`.
-- Speaker map (default labels at first-seen):
-  - `{ source: "mic", speaker_id: 0 }` → user's `displayName` from settings (fallback `"You"` when displayName is empty).
-  - `{ source: "mic", speaker_id: N }` for N ≥ 1 → `"In-room \(N+1)"` — additional voices on the mic stream are presumed in-room participants of a hybrid meeting.
-  - `{ source: "system", speaker_id: N }` → `"Speaker \(N+1)"` — remote-participant labels.
-  User can rename any label; the rename updates the display label, the underlying `(source, speaker_id)` tuple is the stable key.
+- Each normalized transcript token carries: `start_ms`, `end_ms`, `confidence`, `speaker_id` (meaningful only when the active provider supports streaming diarization — Sarvam streaming does not, Deepgram streaming does), `source` (mic / system), `language` (when provider returns it — Sarvam emits per-token language tags for code-switched audio), `meeting_id`.
+- Live-streaming speaker map under Sarvam (Phase 2 default; "Path B" — see `DECISIONS.md` 2026-05-08):
+  - All mic events → user's `displayName` from settings (fallback `"You"`).
+  - All system events → `"Remote"`.
+  - `(source, speaker_id)` rows in the `speakers` table during streaming all use `raw_speaker_id = 0`.
+- Post-hoc batch diarization (fired at `stopMeeting` if the "Auto-run speaker diarization" setting is on, default on): the saved per-stream WAVs are submitted to Sarvam's batch API with `with_diarization=true`. When batch returns, the rename UI in the meeting detail view (Phase 3+) lets the user assign labels to each batch-derived speaker, optionally seeded from calendar attendees. Live transcript_segments rows are then reassigned to the new speaker IDs.
+- Live-streaming speaker map under Deepgram (when routed): standard diarized — `{ source: "mic", speaker_id: 0 }` → `displayName`, additional mic IDs → `"In-room N+1"`, system IDs → `"Speaker N+1"`. Same rename UI applies.
+- User can rename any label; the rename updates the display label, the underlying `(source, speaker_id)` tuple is the stable key.
 - Auto-reconnect with exponential backoff (up to 5 retries, then surface a banner). On reconnect, audio buffered in a 30 s ring is flushed first.
 - Provider failover: if reconnect attempts to Sarvam are exhausted within a 60 s window, the routing layer transparently switches the live meeting to Deepgram. Tokens already committed under Sarvam keep their `provider` tag in the DB; tokens committed after switch are tagged `deepgram`. Speaker IDs are renumbered after switch — the SpeakerLabelManager surfaces a "Map old speakers" prompt so the user can confirm Speaker 1 (Sarvam) = Speaker 1 (Deepgram).
 
@@ -316,15 +319,18 @@ For users who want the full LiteLLM admin UI:
 
 ### 6.1 v1 approach (per user choice)
 
-- Anonymous diarization from the active provider (Sarvam by default; Deepgram on failover), surfaced separately per source stream.
-- The mic stream is diarized too — the in-room hybrid case (one MacBook in a room with several participants, plus remote participants over Zoom) is first-class. The first mic speaker (`raw_speaker_id = 0`) is auto-labeled with the user's `displayName` from settings (fallback `"You"`); subsequent mic speakers get `"In-room 2"`, `"In-room 3"`, etc. System-stream speakers are labeled `"Speaker 1"`, `"Speaker 2"`, etc.
+Diarization is **provider-dependent** and may run live or post-hoc:
+
+- **Sarvam streaming (default in Phase 2)**: streaming STT does *not* support diarization (Sarvam's diarizer is batch-only). Live transcript collapses each stream to a single label — mic → `displayName` (fallback `"You"`), system → `"Remote"`. At `stopMeeting`, if the "Auto-run speaker diarization after meetings" setting is on (default on), execa submits the saved per-stream WAVs to Sarvam's batch API with `with_diarization=true`. When the batch returns, a small rename UI in the meeting detail view (Phase 3+) presents each batch-derived speaker with their first ~10 transcript words and a dropdown — pre-populated from calendar attendees if available, free-text otherwise. The user spends ~15 s assigning labels; the rename retroactively updates the live transcript view and any subsequent summary / MOM call. See `DECISIONS.md` 2026-05-08 "Path B" entry.
+- **Deepgram streaming (Phase 6 failover)**: streaming STT supports diarization natively. Live transcript carries diarized speaker IDs in real time; first mic speaker → `displayName`, additional mic speakers → `"In-room 2"`, `"In-room 3"`, etc.; system speakers → `"Speaker 1"`, `"Speaker 2"`, etc. The same rename UI applies, just without the batch step.
 - A "Speakers" sidebar (Phase 3) lists all detected speakers across both streams with:
   - Their current label (editable inline).
   - Talk-time so far.
   - A short audio sample (last 3 s) — playback button.
   - "Merge into…" to fix diarizer over-segmentation.
   - "Split…" to mark when one label was actually two people (rare).
-- Renames take effect retroactively in the transcript view and in any subsequent summary / MOM call.
+- A "Re-run diarization" action in the meeting detail view triggers the batch on demand — useful if the post-hoc run failed silently or if the user wants to regenerate after editing the transcript.
+- If a batch result arrives while the user is still in the meeting (long meeting, batch is fast), a non-blocking banner appears: "Speaker labels available — apply?" with **Apply** / **Dismiss**. Dismiss leaves the action available from the meeting detail view (same entry point as the manual re-run).
 
 ### 6.2 Data model for forward-compatibility (v2 enrollment)
 

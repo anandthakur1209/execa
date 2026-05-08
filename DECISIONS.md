@@ -149,6 +149,47 @@ The full reasoning lives in `meeting-app-spec.md`; this file is the index so Cla
 - **Why:** Upstream `PCMChunk` sizes vary — `MicrophoneSource` typically delivers ~4 800 frames per tap fire on macOS 14 hardware, while `ScreenCaptureKitSource` delivers ~960 frames per SCStream callback. Sizing by chunk count would give wildly different wall-clock retention windows per source. Sizing by wall-clock seconds requires a clock + per-chunk timestamps, which we have but adds complexity. Frame-count sizing is the cheapest invariant that produces predictable retention duration regardless of upstream chunking, and it's spec §4.2-faithful (the spec says "30 s ring", which is a duration, and frames at a known sample rate are equivalent to a duration).
 - **Status:** Active.
 
+## 2026-05-08 — Phase 2 commit 4: Sarvam streaming API contract (discovered via official samples)
+
+- **Decision:** The Sarvam streaming Speech-to-Text contract — endpoint, auth, audio framing, and response shape — is locked to what the official Sarvam samples publish, not the illustrative example in spec §4.2 prior to this commit. Capturing here so we don't re-litigate when commit 5's `SarvamProvider` is wired.
+- **Endpoint** (transcription, not translation): `wss://api.sarvam.ai/speech-to-text/ws?language-code=<code>&model=<model>` — e.g. `language-code=en-IN`, `model=saarika:v2.5`. The translation endpoint at `wss://api.sarvam.ai/speech-to-text-translate/ws/{key}` is a separate path with a different auth scheme; we don't use it because we want transcript-fidelity (Devanagari for Hindi speech) rather than English translation.
+- **Auth:** `api-subscription-key: <key>` header on the WebSocket upgrade `URLRequest` (the form supported by the published Python sample). The browser-friendly form is the WebSocket subprotocol `api-subscription-key.<key>`; we use the header form because `URLSessionWebSocketTask` accepts custom headers natively.
+- **Audio framing on the wire:** JSON message per chunk, audio is base64-encoded inside the JSON — **not** raw binary frames as the earlier plan assumed.
+  ```json
+  {"audio": {"data": "<base64 of raw 16-bit PCM>", "encoding": "audio/wav", "sample_rate": 16000}}
+  ```
+  Chunk cadence ~100 ms (3 200 bytes per chunk at 16 kHz Int16 mono) per the official samples; we'll send what `PCMChunk` carries (~6–10 ms per chunk from upstream sources) since Sarvam's server handles aggregation.
+- **Server response shape** (from the published HTML sample, `html-scripts/stt.html`):
+  ```json
+  {
+    "type": "data",
+    "data": {
+      "request_id": "<id>",
+      "transcript": "<text>",
+      "language_code": "en-IN",
+      "metrics": {"audio_duration": <seconds>, "processing_latency": <seconds>}
+    }
+  }
+  ```
+  The published samples don't show separate interim/final events — every emitted message is `type=="data"` with a complete transcript chunk. **Whether Sarvam streaming has an interim/final distinction is unresolved** until commit 5's live probe; if the probe shows no interim events, the LiveMeetingView "interim italics" UX is dropped and we render each `data` message as a finalized line directly.
+- **Diarization:** **Not supported on streaming** — Sarvam diarizer is batch-only ("Batch API only: Speaker diarization is only available through the Batch API, not the REST or Streaming APIs"). This forces Path B (next entry).
+- **Streaming STT does not have an explicit `diarization` query parameter, an `interim_results` parameter, or a `vad_events` parameter** in the form the spec previously claimed. The optional params we observed are `language-code`, `model`, and `high_vad_sensitivity`.
+- **Status:** Active. Commit 5's live probe replaces the static fixture in `ExecaTests/Fixtures/sarvam-data-sample.json` with real wire output and may add interim/error variants if they exist.
+
+## 2026-05-08 — Phase 2 commit 4: Path B — post-hoc batch diarization (supersedes mic-diarization streaming)
+
+- **Decision:** Diarization is post-hoc, batch-driven, not streaming. At `stopMeeting`, execa submits the saved per-stream WAVs to Sarvam's batch Speech-to-Text API with `with_diarization=true`. Live transcript ships during the meeting without speaker labels — every mic event collapses to `displayName` (fallback `"You"`); every system event collapses to `"Remote"`. Speaker IDs come from the batch result and get reflected via a post-hoc rename UI in the meeting detail view.
+- **Supersedes:** the 2026-05-08 entry "Phase 2: mic stream is now diarized too." That decision assumed Sarvam streaming supported `diarization=true`; the commit 4 discovery probe (per the entry above) found it does not. The streaming-mic-diarization plan is dead; the *intent* (multi-speaker in-room hybrid meetings get correctly labeled) is preserved via the batch path.
+- **Auto-run toggle:** A new setting `auto_diarization` (default: on) governs whether the batch fires automatically at `stopMeeting`. When off, the batch doesn't run automatically; the user can trigger it via a "Re-run diarization" action in the meeting detail UI on demand. The toggle gates the auto-trigger only, not the capability — manual re-run is always available regardless of toggle state.
+- **Retry:** Batch failures (network, API error, rate limit) surface as a retry affordance in the meeting detail view. The "Re-run diarization" action is the same code path; the user can trigger it any time.
+- **Race condition** (batch returns while the live meeting is still open or while the user is editing the transcript): a non-blocking banner appears — "Speaker labels available — apply?" with Apply / Dismiss. Don't auto-merge — the user keeps control. Dismissing leaves the action available from the meeting detail view (same entry point as manual re-run).
+- **Default labels post-batch:** When the batch returns and the rename UI runs, defaults seeded from each batch-derived speaker are: `(mic, 0)` → `displayName`; `(mic, N≥1)` → `"In-room \(N+1)"`; `(system, N)` → `"Speaker \(N+1)"`. Calendar-attendee seeding is a future improvement (requires calendar integration not yet in scope).
+- **Phase carve-up:**
+  - **Phase 2 ships now**: live streaming with single-label-per-stream (mic→displayName, system→"Remote"); the missing-Sarvam-key gate; the wizard STT step; LiveMeetingView; reconnect UX. *Does not* ship batch kickoff or rename UI — those land in Phase 3.
+  - **Phase 3 lands**: Sarvam batch API client; auto-trigger at `stopMeeting` (gated by the toggle); batch result storage; rename UI in the meeting detail view; the Apply / Dismiss banner; the "Re-run diarization" action; the `auto_diarization` setting key. Phase 3's BUILD_PLAN scope already covers "rename, merge, split"; this just expands it to include the batch-integration that produces the IDs being renamed.
+  - **Phase 5+** (when the meeting detail view UI ships): the rename UI gets its proper home; the calendar-attendee seeding may attach if calendar integration lands.
+- **Status:** Active.
+
 ---
 
 ## How to add an entry

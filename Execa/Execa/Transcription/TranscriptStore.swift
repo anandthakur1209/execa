@@ -268,6 +268,16 @@ final class TranscriptStore {
 
     // MARK: - Pure helpers
 
+    /// Phase 2 (Path B) label policy. Sarvam streaming STT does not support
+    /// diarization, so live events always arrive with `raw_speaker_id == 0`
+    /// — both streams collapse to a single label. Multi-speaker labels are
+    /// produced post-hoc via Sarvam's batch API in Phase 3+.
+    ///
+    /// Defensive defaults are kept for `raw_speaker_id != 0` so the code
+    /// behaves sanely if (a) we run under a provider that does diarize live
+    /// (Deepgram, Phase 6) or (b) Phase 3's batch-backfill writes through
+    /// this same code path. The `(mic, N≥1)` and `(system, N≥1)` labels
+    /// here are placeholders that the Phase 3 rename UI overwrites.
     private func defaultLabel(source: PCMChunk.Source, rawSpeakerID: Int) -> String {
         switch source {
         case .mic:
@@ -276,6 +286,9 @@ final class TranscriptStore {
             }
             return "In-room \(rawSpeakerID + 1)"
         case .system:
+            if rawSpeakerID == 0 {
+                return "Remote"
+            }
             return "Speaker \(rawSpeakerID + 1)"
         }
     }

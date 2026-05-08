@@ -89,11 +89,78 @@ struct TranscriptStoreTests {
         #expect(store.lines[0].isFinal == true)
     }
 
-    @Test func threeMicSpeakersGetDisplayNameInRoom2InRoom3() async throws {
-        // Phase 2 mic-diarization regression gate: with both mic and system
-        // streams diarized, three distinct mic speakers must produce three
-        // speakers rows with [displayName, "In-room 2", "In-room 3"] —
-        // *not* three rows all labeled "You" / displayName.
+    @Test func phase2StreamingMicCollapsesToDisplayName() async throws {
+        // Phase 2 (Path B) regression gate: Sarvam streaming STT does not
+        // diarize, so every mic event arrives with raw_speaker_id=0. The
+        // DB must contain exactly one mic-side speakers row labeled with
+        // the user's displayName, regardless of how many segments come in.
+        let database = try Self.tempDB()
+        let meetingID = ULID.generate()
+        try await Self.insertMeetingRow(database, id: meetingID)
+
+        let store = TranscriptStore(database: database)
+        store.beginMeeting(meetingID: meetingID, startedAt: Date(), displayName: "Anand")
+
+        for index in 0 ..< 5 {
+            await store.ingest(
+                .final(Self.token(speakerID: 0, text: "turn \(index)", startMs: index * 1000)),
+                source: .mic
+            )
+        }
+
+        let labels = try await database.queue.read { db -> [String] in
+            try Row.fetchAll(
+                db,
+                sql: """
+                SELECT display_label FROM speakers
+                WHERE meeting_id = ? AND source = 'mic'
+                ORDER BY raw_speaker_id ASC
+                """,
+                arguments: [meetingID]
+            ).map { $0["display_label"] }
+        }
+        #expect(labels == ["Anand"], "Phase 2 streaming mic must collapse to one label, got \(labels)")
+    }
+
+    @Test func phase2StreamingSystemCollapsesToRemote() async throws {
+        // Same Path-B logic for the system stream: every event arrives with
+        // raw_speaker_id=0 under Sarvam streaming, so the DB must contain
+        // exactly one system-side speakers row labeled "Remote".
+        let database = try Self.tempDB()
+        let meetingID = ULID.generate()
+        try await Self.insertMeetingRow(database, id: meetingID)
+
+        let store = TranscriptStore(database: database)
+        store.beginMeeting(meetingID: meetingID, startedAt: Date(), displayName: "Anand")
+
+        for index in 0 ..< 5 {
+            await store.ingest(
+                .final(Self.token(speakerID: 0, text: "remote \(index)", startMs: index * 1000)),
+                source: .system
+            )
+        }
+
+        let labels = try await database.queue.read { db -> [String] in
+            try Row.fetchAll(
+                db,
+                sql: """
+                SELECT display_label FROM speakers
+                WHERE meeting_id = ? AND source = 'system'
+                ORDER BY raw_speaker_id ASC
+                """,
+                arguments: [meetingID]
+            ).map { $0["display_label"] }
+        }
+        #expect(labels == ["Remote"], "Phase 2 streaming system must collapse to one 'Remote' label, got \(labels)")
+    }
+
+    @Test func batchBackfillMultipleMicSpeakersGetInRoomDefaults() async throws {
+        // Phase 3 forward-looking gate: when the post-hoc Sarvam batch API
+        // produces multiple mic speaker IDs, the (mic, 0) row already
+        // labeled with displayName stays put, and additional mic IDs get
+        // "In-room 2" / "In-room 3" defaults. The Phase 3 rename UI
+        // overwrites these defaults, but until then the code path needs to
+        // produce sensible names.
         let database = try Self.tempDB()
         let meetingID = ULID.generate()
         try await Self.insertMeetingRow(database, id: meetingID)
@@ -119,7 +186,10 @@ struct TranscriptStoreTests {
         #expect(labels == ["Anand", "In-room 2", "In-room 3"], "got \(labels)")
     }
 
-    @Test func systemSpeakersGetSpeakerLabels() async throws {
+    @Test func batchBackfillMultipleSystemSpeakersGetSpeakerDefaults() async throws {
+        // Phase 3 forward-looking gate: post-hoc batch produces multiple
+        // system speaker IDs; (system, 0) keeps "Remote" from streaming;
+        // additional IDs get "Speaker 2" / "Speaker 3" defaults.
         let database = try Self.tempDB()
         let meetingID = ULID.generate()
         try await Self.insertMeetingRow(database, id: meetingID)
@@ -141,7 +211,7 @@ struct TranscriptStoreTests {
                 arguments: [meetingID]
             ).map { $0["display_label"] }
         }
-        #expect(labels == ["Speaker 1", "Speaker 2"])
+        #expect(labels == ["Remote", "Speaker 2"])
     }
 
     @Test func displayNameFallsBackToYouWhenAbsent() async throws {

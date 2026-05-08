@@ -111,8 +111,11 @@ struct TranscriptionServiceTests {
             ).map { $0["display_label"] }
         }
         // Order isn't strictly defined across concurrent mic/system bridges,
-        // but the multiset must match: displayName + Speaker 1 + Speaker 2.
-        #expect(Set(labels) == Set(["Anand", "Speaker 1", "Speaker 2"]), "labels were \(labels)")
+        // but the multiset must match. The system stream delivers
+        // speaker_id 0 and 1; under the Path-B label policy that's
+        // ("Remote", "Speaker 2") rather than ("Speaker 1", "Speaker 2").
+        // Mic delivers speaker_id 0 only → displayName.
+        #expect(Set(labels) == Set(["Anand", "Remote", "Speaker 2"]), "labels were \(labels)")
     }
 
     @Test func stopFlushesPendingInterim() async throws {
