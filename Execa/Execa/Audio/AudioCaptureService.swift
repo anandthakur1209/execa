@@ -47,6 +47,25 @@ actor AudioCaptureService {
         continuation.yield(.idle)
     }
 
+    /// Nonisolated accessors exposed for `TranscriptionService` to subscribe
+    /// without crossing the actor boundary. The underlying `AudioSource`
+    /// streams are themselves nonisolated.
+    nonisolated var micSttStream: AsyncStream<PCMChunk> {
+        mic.sttStream
+    }
+
+    nonisolated var systemSttStream: AsyncStream<PCMChunk> {
+        system.sttStream
+    }
+
+    /// Used by AppCoordinator's preflight gate (Phase 2 missing-key check)
+    /// to surface an error state without going through the regular start
+    /// path. The menu bar's existing `.error(...)` rendering picks this up
+    /// via `stateStream`.
+    func recordPreflightError(_ error: MeetingError) {
+        state = .error(error)
+    }
+
     @discardableResult
     func start(meetingID: String) async throws -> URL {
         guard case .idle = state else {
