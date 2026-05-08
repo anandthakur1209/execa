@@ -38,6 +38,22 @@ struct TranscriptionServiceTests {
         }
     }
 
+    private static func transcriptSegmentTexts(
+        _ database: Execa.Database,
+        meetingID: String
+    ) async throws -> [String] {
+        try await database.queue.read { db -> [String] in
+            try Row.fetchAll(
+                db,
+                sql: """
+                SELECT text FROM transcript_segments
+                WHERE meeting_id = ? ORDER BY id ASC
+                """,
+                arguments: [meetingID]
+            ).map { $0["text"] }
+        }
+    }
+
     @Test func startBridgesEventsIntoStore() async throws {
         let database = try Self.tempDB()
         let meetingID = ULID.generate()
@@ -169,6 +185,89 @@ struct TranscriptionServiceTests {
 
         micCont.finish()
         systemCont.finish()
+    }
+
+    @Test func resumeAttachesNewProvidersWithoutClearingTranscript() async throws {
+        let database = try Self.tempDB()
+        let meetingID = ULID.generate()
+        try await Self.insertMeetingRow(database, id: meetingID)
+
+        let store = await TranscriptStore(database: database)
+        let service = TranscriptionService(store: store)
+        let (micStream, _) = AsyncStream<PCMChunk>.makeStream()
+        let (systemStream, _) = AsyncStream<PCMChunk>.makeStream()
+        let context = TranscriptionService.StartContext(
+            meetingID: meetingID,
+            startedAt: Date(),
+            displayName: "Anand",
+            micStream: micStream,
+            systemStream: systemStream
+        )
+
+        try await service.start(
+            providerFactory: Self.factoryWithMic(["first turn before outage"], terminating: true),
+            context: context
+        )
+        try await Task.sleep(nanoseconds: 200_000_000)
+        try await Self.assertResumeBaseline(database: database, meetingID: meetingID, store: store)
+
+        try await service.resume(
+            providerFactory: Self.factoryWithMic(["second turn after resume"], terminating: false),
+            context: context
+        )
+        try await Task.sleep(nanoseconds: 200_000_000)
+        try await Self.assertResumeAppended(database: database, meetingID: meetingID, store: store)
+
+        await service.stop()
+    }
+
+    // MARK: - Resume-test helpers
+
+    /// Builds a factory that returns mocks scripted to emit one .final
+    /// per text plus an optional terminating .error(.reconnectExhausted)
+    /// on mic. System always emits just .connected.
+    private static func factoryWithMic(
+        _ texts: [String],
+        terminating: Bool
+    ) -> TranscriptionService.ProviderFactory {
+        var micEvents: [TranscriptionEvent] = [.connected]
+        for text in texts {
+            micEvents.append(.final(Self.token(text: text)))
+        }
+        if terminating {
+            micEvents.append(.error(.reconnectExhausted))
+        }
+        let micRef = MockTranscriptionProvider(events: micEvents)
+        let systemRef = MockTranscriptionProvider(events: [.connected])
+        return { source in
+            switch source {
+            case .mic: micRef
+            case .system: systemRef
+            }
+        }
+    }
+
+    private static func assertResumeBaseline(
+        database: Execa.Database,
+        meetingID: String,
+        store: TranscriptStore
+    ) async throws {
+        let rows = try await transcriptSegmentTexts(database, meetingID: meetingID)
+        #expect(rows == ["first turn before outage"], "phase 1 rows were \(rows)")
+        #expect(await store.connection[.mic] == .stopped)
+    }
+
+    private static func assertResumeAppended(
+        database: Execa.Database,
+        meetingID: String,
+        store: TranscriptStore
+    ) async throws {
+        let rows = try await transcriptSegmentTexts(database, meetingID: meetingID)
+        #expect(
+            rows == ["first turn before outage", "second turn after resume"],
+            "expected resume to append, not reset; got \(rows)"
+        )
+        #expect(await store.connection[.mic] == .connected)
     }
 
     @Test func missingSarvamKeyHardRefusesToStartMeeting() async throws {

@@ -111,4 +111,38 @@ actor AppCoordinator {
         await transcription.stop()
         _ = try await audioCapture.stop()
     }
+
+    /// Re-attaches transcription providers after a reconnect-exhausted
+    /// state. Pulls the live meeting context from `audioCapture.state` —
+    /// no-op if the meeting isn't currently `.recording`. Doesn't reset
+    /// the transcript store, so the existing transcript is preserved
+    /// and new utterances append from "now" onward. Audio captured
+    /// during the dead window is unrecoverable.
+    func resumeTranscription() async {
+        let state = await audioCapture.state
+        guard case let .recording(meetingID, startedAt) = state else { return }
+        let storedKey: String?
+        do {
+            storedKey = try keychain.get(
+                service: KeychainStore.serviceName(forProvider: "sarvam"),
+                account: "default"
+            )
+        } catch {
+            storedKey = nil
+        }
+        guard let validKey = storedKey, !validKey.isEmpty else { return }
+        let displayName = await (try? settings.string(forKey: .displayName)) ?? nil
+        let factory = transcriptionProviderFactory
+        let context = TranscriptionService.StartContext(
+            meetingID: meetingID,
+            startedAt: startedAt,
+            displayName: displayName,
+            micStream: audioCapture.micSttStream,
+            systemStream: audioCapture.systemSttStream
+        )
+        try? await transcription.resume(
+            providerFactory: { source in factory(source, validKey) },
+            context: context
+        )
+    }
 }

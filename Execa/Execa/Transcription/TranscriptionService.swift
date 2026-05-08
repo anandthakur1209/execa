@@ -32,12 +32,11 @@ actor TranscriptionService {
         self.store = store
     }
 
-    /// Starts both providers and bridges their events into `store`. The
-    /// caller is responsible for having validated any required credentials
-    /// (Sarvam API key) and bound them inside `providerFactory` before this
-    /// is called.
+    /// Starts both providers for a fresh meeting. Resets the transcript
+    /// store via `beginMeeting`, then attaches new providers. The caller
+    /// is responsible for having validated credentials and bound them
+    /// inside `providerFactory` before this is called.
     func start(providerFactory: ProviderFactory, context: StartContext) async throws {
-        // Initialize the store for this meeting on MainActor.
         let storeRef = store
         await MainActor.run {
             storeRef.beginMeeting(
@@ -46,7 +45,22 @@ actor TranscriptionService {
                 displayName: context.displayName
             )
         }
+        try await attachProviders(providerFactory: providerFactory, context: context)
+    }
 
+    /// Re-attaches providers without resetting the transcript store.
+    /// Used by the LiveMeetingView "Resume" button when the previous
+    /// providers exhausted their reconnect budget. The same audio
+    /// streams keep flowing — new providers pick up from wherever the
+    /// `AsyncStream` buffer is, so audio captured during the dead window
+    /// is missed but the meeting continues without a transcript reset.
+    func resume(providerFactory: ProviderFactory, context: StartContext) async throws {
+        // Tear down whatever's left of the old provider trees first.
+        await stopProvidersOnly()
+        try await attachProviders(providerFactory: providerFactory, context: context)
+    }
+
+    private func attachProviders(providerFactory: ProviderFactory, context: StartContext) async throws {
         let mic = providerFactory(.mic)
         let system = providerFactory(.system)
         do {
@@ -67,6 +81,7 @@ actor TranscriptionService {
         // Bridge tasks: drain each provider's events into the store. The
         // AsyncStream is closed when the provider's stop() finishes the
         // continuation, at which point the for-await exits.
+        let storeRef = store
         let micEvents = mic.events
         let systemEvents = system.events
         let micBridge = Task {
@@ -83,6 +98,20 @@ actor TranscriptionService {
         micProvider = mic
         systemProvider = system
         bridgeTasks = [micBridge, systemBridge]
+    }
+
+    /// Stops providers + bridges only. Doesn't flush the store. Used
+    /// internally by `resume()` to drop the dead provider tree before
+    /// attaching a fresh one.
+    private func stopProvidersOnly() async {
+        if let mic = micProvider { await mic.stop() }
+        if let system = systemProvider { await system.stop() }
+        for task in bridgeTasks {
+            _ = await task.value
+        }
+        bridgeTasks = []
+        micProvider = nil
+        systemProvider = nil
     }
 
     /// Stops both providers, waits for bridge tasks to drain, flushes any

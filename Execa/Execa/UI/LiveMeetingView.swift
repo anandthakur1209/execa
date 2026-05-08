@@ -22,6 +22,10 @@ struct LiveMeetingView: View {
         VStack(spacing: 0) {
             topBar
             Divider()
+            if anyStopped {
+                resumeBanner
+                Divider()
+            }
             transcriptList
         }
         .frame(minWidth: 480, minHeight: 360)
@@ -31,6 +35,33 @@ struct LiveMeetingView: View {
                 meetingState = state
             }
         }
+    }
+
+    private var anyStopped: Bool {
+        store.connection.values.contains(.stopped)
+    }
+
+    private var resumeBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Transcription stopped")
+                    .font(.callout.bold())
+                Text("Sarvam reconnect attempts were exhausted. Audio is still being recorded.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button("Resume") {
+                Task { await coordinator.resumeTranscription() }
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.red.opacity(0.08))
     }
 
     // MARK: - Top bar
