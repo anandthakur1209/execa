@@ -108,6 +108,31 @@ final nonisolated class Database: @unchecked Sendable {
                 );
             """)
         }
+        // FTS5 sync triggers for transcript_fts. The v1 contentless FTS
+        // table only indexes content when these triggers fire on the
+        // underlying transcript_segments table; without them, every
+        // INSERT into transcript_segments leaves the FTS index empty and
+        // Phase 5's history search returns nothing. Additive migration —
+        // existing v1-only databases on the dev machine pick this up on
+        // next launch.
+        migrator.registerMigration("v2_transcript_fts_triggers") { db in
+            try db.execute(sql: """
+                CREATE TRIGGER transcript_fts_ai AFTER INSERT ON transcript_segments BEGIN
+                    INSERT INTO transcript_fts(rowid, text) VALUES (new.id, new.text);
+                END;
+            """)
+            try db.execute(sql: """
+                CREATE TRIGGER transcript_fts_ad AFTER DELETE ON transcript_segments BEGIN
+                    INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES ('delete', old.id, old.text);
+                END;
+            """)
+            try db.execute(sql: """
+                CREATE TRIGGER transcript_fts_au AFTER UPDATE ON transcript_segments BEGIN
+                    INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES ('delete', old.id, old.text);
+                    INSERT INTO transcript_fts(rowid, text) VALUES (new.id, new.text);
+                END;
+            """)
+        }
         return migrator
     }()
 }
