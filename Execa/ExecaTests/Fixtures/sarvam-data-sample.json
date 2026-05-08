@@ -1,12 +1,15 @@
 {
   "type": "data",
   "data": {
-    "request_id": "phase2-fixture-0001",
-    "transcript": "hello, this is a phase 2 transcription test",
+    "request_id": "20260508_604f6af9-79c7-4eab-a63a-46c5640d75e6",
+    "transcript": "Hello. This is a phase two transcription test.",
+    "timestamps": null,
+    "diarized_transcript": null,
     "language_code": "en-IN",
+    "language_probability": null,
     "metrics": {
-      "audio_duration": 2.45,
-      "processing_latency": 0.82
+      "audio_duration": 3.84,
+      "processing_latency": 0.1627182960510254
     }
   }
 }

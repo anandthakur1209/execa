@@ -105,33 +105,3 @@ actor TranscriptionService {
         systemProvider = nil
     }
 }
-
-/// Placeholder used by AppCoordinator's default factory before
-/// `SarvamProvider` lands in commit 5. Emits `.connected` once and then
-/// idles. Discarded once the production factory points at `SarvamProvider`.
-final class EmptyTranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
-    nonisolated let events: AsyncStream<TranscriptionEvent>
-    private nonisolated let continuation: AsyncStream<TranscriptionEvent>.Continuation
-
-    init() {
-        var cont: AsyncStream<TranscriptionEvent>.Continuation?
-        let stream = AsyncStream<TranscriptionEvent> { capturedCont in cont = capturedCont }
-        events = stream
-        guard let captured = cont else {
-            preconditionFailure("AsyncStream did not yield continuation")
-        }
-        continuation = captured
-    }
-
-    func start(meetingID _: String, source _: PCMChunk.Source, audioStream: AsyncStream<PCMChunk>) async throws {
-        continuation.yield(.connected)
-        // Drain the audio stream so the producer doesn't stall.
-        Task {
-            for await _ in audioStream {}
-        }
-    }
-
-    func stop() async {
-        continuation.finish()
-    }
-}

@@ -18,7 +18,7 @@ actor AppCoordinator {
     private let transcriptionProviderFactory: TranscriptionProviderFactory
 
     init(
-        transcriptionProviderFactory: @escaping TranscriptionProviderFactory = { _, _ in EmptyTranscriptionProvider() }
+        transcriptionProviderFactory: @escaping TranscriptionProviderFactory = { _, key in SarvamProvider(apiKey: key) }
     ) async throws {
         let database = try Database.make()
         self.database = database
