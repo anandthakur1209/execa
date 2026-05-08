@@ -94,6 +94,9 @@ struct MenuBarMenu: View {
                 Button("Open Microphone Settings…") { onOpenMicSettings() }
             case .permissionDenied(.screenRecording):
                 Button("Open Screen Recording Settings…") { onOpenScreenSettings() }
+            case .missingSTTKey:
+                // Deep-link into the wizard's STT step lands in commit 3.
+                EmptyView()
             case .diskFull, .streamFailed:
                 EmptyView()
             }
@@ -109,6 +112,7 @@ struct MenuBarMenu: View {
         case .permissionDenied(.microphone): "Recording paused: microphone permission denied"
         case .permissionDenied(.screenRecording): "Recording paused: screen recording permission denied"
         case .diskFull: "Recording paused: disk full"
+        case .missingSTTKey: "No Sarvam key — add one in the wizard"
         case let .streamFailed(message): "Recording paused: \(message)"
         }
     }

@@ -135,6 +135,20 @@ The full reasoning lives in `meeting-app-spec.md`; this file is the index so Cla
 - **Mitigation if it becomes blocking:** Switch the mic input from a raw `AVAudioEngine` tap to `kAUVoiceProcessingIO` (an audio unit), or wait for the macOS 15+ `SCStream.captureMicrophone` path which routes mic through SCK and avoids the dual-engine collision entirely.
 - **Status:** Parked.
 
+## 2026-05-08 — Phase 2: mic stream is now diarized too (supersedes spec §4.2 `diarization=false` for mic)
+
+- **Decision:** Both `SarvamProvider` instances — mic and system — connect with `diarization=true`. Default labels assigned at first-seen `(source, raw_speaker_id)`: `(mic, 0)` → `settings.displayName` (fallback `"You"`); `(mic, N≥1)` → `"In-room \(N+1)"`; `(system, N)` → `"Speaker \(N+1)"`. The `(meeting_id, source, raw_speaker_id)` UNIQUE key in the existing `speakers` schema already supports the multi-speaker mic case — no migration needed.
+- **Supersedes:** spec §4.2 prior wording "Mic stream: `diarization=false` (mic = local user, always)." Spec §4.1 / §4.2 / §6.1 rewritten accordingly. CLAUDE.md's "Mic and system audio streams stay separate end-to-end" non-negotiable kept; rationale rewritten to cite per-stream diarization quality and the data-model source distinction (no longer "the 'You' label depends on it").
+- **Why:** Multi-person in-room meetings around one MacBook are a real workflow — particularly hybrid setups where some participants are in the room and others dial in via Zoom. The original "mic = always one person" assumption produced a single transcript line collapsing all in-room voices, lossy in exactly the scenario the product needs to handle. With both streams diarized, the in-room participants get `In-room 2/3/...` labels and the remote participants get `Speaker 1/2/...`; the user's own voice is `displayName` regardless of source. The cost (one extra `diarization=true` query param on the mic socket) is trivial.
+- **Status:** Active. Phase 3 adds a rename UI on top of these defaults.
+
+## 2026-05-08 — Phase 2: 30 s reconnect ring buffer is sized by frame count, not chunk count
+
+- **Decision:** `AudioRingBuffer` retains the most recent N audio frames per source (default 480 000 = 30 s at 16 kHz). Push appends; if `totalFrames > maxFrames`, oldest chunks are dropped until back under cap. `drain()` returns all retained chunks in insertion order and clears the buffer.
+- **Alternatives considered:** Sizing by chunk count (e.g. "last 100 chunks"). Sizing by wall-clock seconds.
+- **Why:** Upstream `PCMChunk` sizes vary — `MicrophoneSource` typically delivers ~4 800 frames per tap fire on macOS 14 hardware, while `ScreenCaptureKitSource` delivers ~960 frames per SCStream callback. Sizing by chunk count would give wildly different wall-clock retention windows per source. Sizing by wall-clock seconds requires a clock + per-chunk timestamps, which we have but adds complexity. Frame-count sizing is the cheapest invariant that produces predictable retention duration regardless of upstream chunking, and it's spec §4.2-faithful (the spec says "30 s ring", which is a duration, and frames at a known sample rate are equivalent to a duration).
+- **Status:** Active.
+
 ---
 
 ## How to add an entry

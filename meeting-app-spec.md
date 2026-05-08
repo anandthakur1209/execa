@@ -139,8 +139,8 @@ A native macOS application that sits in the menu bar, records both microphone an
   - **Microphone audio**: Default input device via `AVAudioEngine` (or `SCStream.captureMicrophone` on macOS 15+).
 - Both are resampled to **16 kHz mono PCM Int16** before being fed to STT.
 - The two streams are kept **separate** end-to-end (not pre-mixed) so that:
-  - Diarization quality is preserved (mic = local user is unambiguous).
-  - We can always tag the local user as one speaker without relying on the diarizer.
+  - Per-stream diarization quality is preserved — each provider socket sees only one acoustic environment, so the diarizer is not asked to disentangle "in-room voices speaking on top of remote-participant audio playback" inside a single mixed signal.
+  - The data model can attribute every transcript token to mic vs. system at insert time via the `(meeting_id, source, raw_speaker_id)` UNIQUE key in `speakers`. No source-recovery heuristics are needed downstream.
 - A **mixed master** is also recorded to `meeting_<id>.flac` for archival and re-processing.
 - Output device changes (AirPods connect/disconnect) handled via `AVAudioEngine` configuration-change notifications — capture is restarted seamlessly without ending the meeting.
 - VAD / silence trim: optional, off by default for v1.
@@ -160,23 +160,25 @@ A native macOS application that sits in the menu bar, records both microphone an
 - Endpoint (illustrative, refer to current Sarvam docs at build time):
   `wss://api.sarvam.ai/speech-to-text/ws?model=saaras:v3&language=hi-en&diarization=true&interim_results=true&word_timestamps=true&vad_events=true`
 - `language=hi-en` enables auto-detect across Hindi + English with code-switch handling. For other Indic languages, set accordingly (e.g. `mr-en`, `ta-en`, `gu-en`).
-- Mic stream: `diarization=false` (mic = local user, always).
-- System stream: `diarization=true` — speaker IDs are stable across turns and across language switches.
+- **Both** mic and system streams use `diarization=true`. Multi-person in-room meetings around one MacBook (especially hybrid setups: in-room participants + remote participants via Zoom) are first-class — the mic stream may legitimately carry several speakers, and the diarizer disentangles them. See `DECISIONS.md` 2026-05-08 entry "Phase 2: mic stream is now diarized too."
 - Audio format: 16-bit PCM, 16 kHz mono.
 
 #### Deepgram Nova-3 multilingual (English-heavy / fallback)
 - Endpoint:
   `wss://api.deepgram.com/v1/listen?model=nova-3&language=multi&diarize=true&punctuate=true&interim_results=true&vad_events=true&endpointing=300&smart_format=true&utterances=true`
 - `language=multi` enables Deepgram's 10-language code-switching mode (English + Hindi + 8 others).
-- Mic stream: `diarize=false`. System stream: `diarize=true`.
+- Both streams use `diarize=true`, matching the Sarvam path (see above).
 
 #### Common event handling (provider-agnostic)
 - Receive events:
   - Interim results with `is_final=false` → rendered in italic/grey in the transcript view.
   - On `is_final=true` (Deepgram) / equivalent finalized event (Sarvam), commit to the transcript store and trigger any pending UI scroll.
-- Each normalized transcript token carries: `start_ms`, `end_ms`, `confidence`, `speaker_id` (system stream only), `source` (mic / system), `language` (when provider returns it — Sarvam emits per-word language tags for code-switched audio), `meeting_id`.
-- Speaker map: `{ source: "system", speaker_id: 0 } -> "Speaker 1"` (display label). User can rename; the rename updates the display label, the underlying `(source, speaker_id)` tuple is the stable key.
-- The local user (mic) is shown as **"You"** by default; user can rename to their actual name in settings (used in MOM).
+- Each normalized transcript token carries: `start_ms`, `end_ms`, `confidence`, `speaker_id` (now meaningful for both mic and system, since both are diarized), `source` (mic / system), `language` (when provider returns it — Sarvam emits per-word language tags for code-switched audio), `meeting_id`.
+- Speaker map (default labels at first-seen):
+  - `{ source: "mic", speaker_id: 0 }` → user's `displayName` from settings (fallback `"You"` when displayName is empty).
+  - `{ source: "mic", speaker_id: N }` for N ≥ 1 → `"In-room \(N+1)"` — additional voices on the mic stream are presumed in-room participants of a hybrid meeting.
+  - `{ source: "system", speaker_id: N }` → `"Speaker \(N+1)"` — remote-participant labels.
+  User can rename any label; the rename updates the display label, the underlying `(source, speaker_id)` tuple is the stable key.
 - Auto-reconnect with exponential backoff (up to 5 retries, then surface a banner). On reconnect, audio buffered in a 30 s ring is flushed first.
 - Provider failover: if reconnect attempts to Sarvam are exhausted within a 60 s window, the routing layer transparently switches the live meeting to Deepgram. Tokens already committed under Sarvam keep their `provider` tag in the DB; tokens committed after switch are tagged `deepgram`. Speaker IDs are renumbered after switch — the SpeakerLabelManager surfaces a "Map old speakers" prompt so the user can confirm Speaker 1 (Sarvam) = Speaker 1 (Deepgram).
 
@@ -314,9 +316,9 @@ For users who want the full LiteLLM admin UI:
 
 ### 6.1 v1 approach (per user choice)
 
-- Anonymous diarization from Deepgram, surfaced as `Speaker 1`, `Speaker 2`, etc.
-- The first segment from the mic stream is auto-labeled **You** (configurable to user's actual name).
-- A "Speakers" sidebar lists all detected speakers with:
+- Anonymous diarization from the active provider (Sarvam by default; Deepgram on failover), surfaced separately per source stream.
+- The mic stream is diarized too — the in-room hybrid case (one MacBook in a room with several participants, plus remote participants over Zoom) is first-class. The first mic speaker (`raw_speaker_id = 0`) is auto-labeled with the user's `displayName` from settings (fallback `"You"`); subsequent mic speakers get `"In-room 2"`, `"In-room 3"`, etc. System-stream speakers are labeled `"Speaker 1"`, `"Speaker 2"`, etc.
+- A "Speakers" sidebar (Phase 3) lists all detected speakers across both streams with:
   - Their current label (editable inline).
   - Talk-time so far.
   - A short audio sample (last 3 s) — playback button.
