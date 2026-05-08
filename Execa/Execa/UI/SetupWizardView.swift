@@ -55,10 +55,7 @@ struct SetupWizardView: View {
         case .permissions:
             permissionsStep
         case .sttKeys:
-            placeholder("""
-            Add your Sarvam (or Deepgram) API key on this step. Validation arrives in a later \
-            phase; for now the wizard just walks you through.
-            """)
+            SetupWizardSttKeyStep(coordinator: coordinator)
         case .llmKeys:
             placeholder("Add your Anthropic (or OpenAI / Gemini) API key. Validation arrives later.")
         case .displayName:

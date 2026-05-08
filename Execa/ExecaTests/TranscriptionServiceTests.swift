@@ -58,7 +58,9 @@ struct TranscriptionServiceTests {
         )
 
         try await service.start(providerFactory: factoryFn, context: context)
-        try await Task.sleep(nanoseconds: 100_000_000)
+        // 500 ms is enough headroom for both bridge tasks to drain three
+        // events apiece and complete their DB writes; 100 ms was racy.
+        try await Task.sleep(nanoseconds: 500_000_000)
 
         try await assertThreeFinalsLanded(database: database, meetingID: meetingID)
 
