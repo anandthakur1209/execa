@@ -8,7 +8,7 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 
 ## Current status
 
-**Phase 1 complete (tagged `phase-1`).** Phase 0 (project scaffold + persistence) and Phase 1 (audio capture + archival) are landed end-to-end. The app captures mic + system audio in parallel from the menu bar, archives `mic.wav` and `system.wav` per source, and post-processes a downmixed `master.flac` at stop, all under the sandbox container. Permission gating, source-startup atomicity, AirPods hot-swap reattach, empty-meeting tolerance, and disk-full graceful pause are wired. Next step: Phase 2.
+**Phase 2 complete (tagged `phase-2`).** Phase 0 + Phase 1 + Phase 2 are landed end-to-end. The app captures mic + system audio (Phase 1), runs both streams through Sarvam Saarika streaming STT, and renders a live transcript in a floating window during a meeting. Speaker labels are post-hoc batch-driven (Path B): live streaming collapses each stream to a single label (mic → `displayName`, system → `"Remote"`); diarized labels arrive via Sarvam's batch API at meeting-stop in Phase 3. The missing-Sarvam-key gate, wizard STT key step, 30 s reconnect ring buffer, exponential-backoff retry, and Resume action for reconnect-exhausted state are all wired. Sarvam wire contract (URL, auth, JSON+base64 framing, single-message-per-utterance behaviour) was discovered via a live probe (`scripts/sarvam-probe.swift`) and locked into `DECISIONS.md`. Next step: Phase 3.
 
 ---
 
