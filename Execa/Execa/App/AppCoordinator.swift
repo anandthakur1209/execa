@@ -10,11 +10,11 @@ actor AppCoordinator {
 
     private let database: Database
     private let settings: SettingsStore
-    let keychain: KeychainStore
-    let permissions: PermissionsService
-    let audioCapture: AudioCaptureService
-    let transcription: TranscriptionService
-    let transcriptStore: TranscriptStore
+    nonisolated let keychain: KeychainStore
+    nonisolated let permissions: PermissionsService
+    nonisolated let audioCapture: AudioCaptureService
+    nonisolated let transcription: TranscriptionService
+    nonisolated let transcriptStore: TranscriptStore
     private let transcriptionProviderFactory: TranscriptionProviderFactory
 
     init(

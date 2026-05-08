@@ -57,6 +57,7 @@ struct MenuBarMenu: View {
     let onStop: () -> Void
     let onOpenScreenSettings: () -> Void
     let onOpenMicSettings: () -> Void
+    let onShowLiveWindow: () -> Void
 
     var body: some View {
         switch state {
@@ -76,6 +77,7 @@ struct MenuBarMenu: View {
         case .recording:
             Button("Stop Meeting") { onStop() }
                 .keyboardShortcut("E", modifiers: [.command, .shift])
+            Button("Show Live Meeting Window") { onShowLiveWindow() }
             Divider()
             Button("Quit execa") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("Q", modifiers: .command)

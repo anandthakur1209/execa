@@ -7,6 +7,7 @@ struct ExecaApp: App {
     @State private var initError: String?
     @State private var firstRunComplete: Bool = false
     @State private var meetingState: MeetingState = .idle
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some Scene {
@@ -34,6 +35,17 @@ struct ExecaApp: App {
             }
         }
 
+        WindowGroup(id: "execa-live-meeting") {
+            if let coordinator {
+                LiveMeetingView(
+                    coordinator: coordinator,
+                    store: coordinator.transcriptStore
+                )
+            } else {
+                ProgressView("Starting execa…").padding()
+            }
+        }
+
         MenuBarExtra {
             if let coordinator {
                 MenuBarMenu(
@@ -45,6 +57,9 @@ struct ExecaApp: App {
                     },
                     onOpenMicSettings: {
                         Task { coordinator.permissions.openMicrophoneSettings() }
+                    },
+                    onShowLiveWindow: {
+                        openWindow(id: "execa-live-meeting")
                     }
                 )
             } else {
@@ -59,6 +74,14 @@ struct ExecaApp: App {
         var lastDiskFullAlertShown = false
         for await newState in coordinator.audioCapture.stateStream {
             meetingState = newState
+            switch newState {
+            case .recording:
+                openWindow(id: "execa-live-meeting")
+            case .idle:
+                dismissWindow(id: "execa-live-meeting")
+            default:
+                break
+            }
             if case .error(.diskFull) = newState, !lastDiskFullAlertShown {
                 lastDiskFullAlertShown = true
                 await MainActor.run { Self.showDiskFullAlert() }
