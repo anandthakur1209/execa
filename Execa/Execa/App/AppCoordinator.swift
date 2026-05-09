@@ -16,6 +16,7 @@ actor AppCoordinator {
     nonisolated let transcription: TranscriptionService
     nonisolated let transcriptStore: TranscriptStore
     nonisolated let diarizationStatusStore: DiarizationStatusStore
+    nonisolated let speakerLabelManager: SpeakerLabelManager
     private let diarization: DiarizationService
     private let transcriptionProviderFactory: TranscriptionProviderFactory
 
@@ -78,6 +79,7 @@ actor AppCoordinator {
             settings: settings,
             diarize: resolvedDiarize
         )
+        speakerLabelManager = SpeakerLabelManager(database: database)
     }
 
     func currentDisplayName() async throws -> String? {
