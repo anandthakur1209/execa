@@ -28,6 +28,14 @@ final class TranscriptStore {
         .system: .disconnected
     ]
 
+    /// Live talk-time per `speakers.id` row, in seconds. Sum of
+    /// `(endMs - startMs) / 1000` across `.final` ingests. The
+    /// `SpeakerSidebar` reads this; post-meeting `MeetingDetailView`
+    /// uses the SQL equivalent (`SpeakerQueries.talkTimeAggregated`).
+    /// Keyed by raw `speakers.id` because merges (a post-batch
+    /// affordance) haven't happened yet at live time.
+    private(set) var talkTimeBySpeaker: [Int64: TimeInterval] = [:]
+
     private let database: Database
     /// Clock used to compute wall-clock-since-meeting-start when a
     /// streaming provider can't supply absolute timestamps (Sarvam).
@@ -64,6 +72,7 @@ final class TranscriptStore {
         lines = []
         speakerRowIDs = [:]
         interimLineIDs = [:]
+        talkTimeBySpeaker = [:]
         connection = [.mic: .disconnected, .system: .disconnected]
     }
 
@@ -213,6 +222,9 @@ final class TranscriptStore {
             text: token.text,
             confidence: token.confidence
         )
+
+        // Live talk-time tally for the SpeakerSidebar.
+        talkTimeBySpeaker[speakerID, default: 0] += max(0, computedEnd - computedStart)
 
         if let interimID = interimLineIDs.removeValue(forKey: key),
            let index = lines.firstIndex(where: { $0.id == interimID }) {

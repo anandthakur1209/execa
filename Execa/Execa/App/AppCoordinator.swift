@@ -8,7 +8,7 @@ actor AppCoordinator {
     /// `startMeeting()`'s gate before the factory is invoked.
     typealias TranscriptionProviderFactory = @Sendable (PCMChunk.Source, String) -> any TranscriptionProvider
 
-    private let database: Database
+    nonisolated let database: Database
     private let settings: SettingsStore
     nonisolated let keychain: KeychainStore
     nonisolated let permissions: PermissionsService

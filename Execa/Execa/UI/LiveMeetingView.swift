@@ -33,10 +33,29 @@ struct LiveMeetingView: View {
                 resumeBanner
                 Divider()
             }
-            transcriptList
+            HStack(spacing: 0) {
+                if let meetingID = currentMeetingID {
+                    SpeakerSidebar(
+                        coordinator: coordinator,
+                        store: store,
+                        meetingID: meetingID
+                    )
+                    Divider()
+                }
+                transcriptList
+            }
         }
-        .frame(minWidth: 480, minHeight: 360)
+        .frame(minWidth: 720, minHeight: 360)
         .navigationTitle("Live Meeting")
+    }
+
+    /// The currently-recording meeting's ID, pulled out of the
+    /// `MeetingState` for the sidebar to bind. Nil when not recording
+    /// (transition window, error state).
+    private var currentMeetingID: String? {
+        if case let .recording(id, _) = meetingState { return id }
+        if case let .savingMeeting(id) = meetingState { return id }
+        return nil
     }
 
     private var anyStopped: Bool {
