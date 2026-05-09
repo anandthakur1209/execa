@@ -128,6 +128,20 @@ struct SetupWizardView: View {
             Text("Look for the execa icon in your menu bar to start a meeting.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "headphones")
+                    .foregroundStyle(.secondary)
+                Text(
+                    """
+                    **For best results, use headphones during meetings.** Speaker output \
+                    bleeds into the mic and produces duplicate transcript entries.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 4)
         }
     }
 

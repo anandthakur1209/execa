@@ -171,9 +171,7 @@ A native macOS application that sits in the menu bar, records both microphone an
 - Deepgram supports streaming diarization, unlike Sarvam — when the router picks Deepgram, both streams set `diarize=true` and live transcript carries diarized speaker IDs without needing the post-hoc batch step. This is one reason Deepgram is the failover-of-choice for sessions where live speaker labels matter more than Sarvam's Hinglish accuracy advantage.
 
 #### Common event handling (provider-agnostic)
-- Receive events:
-  - Interim results with `is_final=false` → rendered in italic/grey in the transcript view.
-  - On `is_final=true` (Deepgram) / equivalent finalized event (Sarvam), commit to the transcript store and trigger any pending UI scroll.
+- Each finalized event renders as a normal-weight transcript line and commits to the transcript store. The Phase 2 commit 5 live probe found that Sarvam streaming emits exactly one `type: "data"` message per VAD-detected utterance with the full final text — no interim/final distinction in the wire format. Deepgram streaming (Phase 6) may emit interim events tagged `is_final=false`; the LiveMeetingView's italic-rendering code path stays in place as forward-compatible scaffolding (currently a no-op for Sarvam since only finals arrive).
 - Each normalized transcript token carries: `start_ms`, `end_ms`, `confidence`, `speaker_id` (meaningful only when the active provider supports streaming diarization — Sarvam streaming does not, Deepgram streaming does), `source` (mic / system), `language` (when provider returns it — Sarvam emits per-token language tags for code-switched audio), `meeting_id`.
 - Live-streaming speaker map under Sarvam (Phase 2 default; "Path B" — see `DECISIONS.md` 2026-05-08):
   - All mic events → user's `displayName` from settings (fallback `"You"`).

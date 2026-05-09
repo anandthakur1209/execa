@@ -174,6 +174,14 @@ struct LiveMeetingView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 360)
                 .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: 4) {
+                Image(systemName: "headphones")
+                    .font(.caption)
+                Text("Tip: use headphones to avoid duplicate transcript entries from speaker bleed.")
+                    .font(.caption)
+            }
+            .foregroundStyle(.tertiary)
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
