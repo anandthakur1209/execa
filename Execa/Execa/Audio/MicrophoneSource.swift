@@ -32,18 +32,31 @@ actor MicrophoneSource: AudioSource {
     private var configChangeObserver: NSObjectProtocol?
     private var archivalURL: URL?
 
-    nonisolated let sttStream: AsyncStream<PCMChunk>
-    private nonisolated let sttContinuation: AsyncStream<PCMChunk>.Continuation
+    /// `_sttStream` and `sttContinuation` are recreated on every
+    /// `start(archivalURL:)` call. Meeting 1's `tapHandler.close()` calls
+    /// `sttContinuation.finish()` to terminate any leftover consumer's
+    /// for-await; Meeting 2 then needs a FRESH continuation to yield
+    /// into, otherwise its tap handler's yields go to the void
+    /// (AsyncStream.Continuation silently drops yields after `.finish()`).
+    /// The `streamLock` synchronises access between the actor's
+    /// `start(...)` mutator and the `nonisolated` `sttStream` getter.
+    /// Pre-`start(...)` consumers see an idle initial stream that
+    /// finishes the moment the first meeting starts.
+    private nonisolated(unsafe) var _sttStream: AsyncStream<PCMChunk>
+    private nonisolated(unsafe) var sttContinuation: AsyncStream<PCMChunk>.Continuation
+    private nonisolated let streamLock = NSLock()
+
     nonisolated let errorStream: AsyncStream<MeetingError>
     private nonisolated let errorContinuation: AsyncStream<MeetingError>.Continuation
 
     init(bufferSize: AVAudioFrameCount = 4096) {
         self.bufferSize = bufferSize
+
         var sttCont: AsyncStream<PCMChunk>.Continuation?
-        let sttStream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
+        let initialStream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
             sttCont = cont
         }
-        self.sttStream = sttStream
+        _sttStream = initialStream
         guard let sttCaptured = sttCont else {
             preconditionFailure("AsyncStream did not yield continuation")
         }
@@ -60,6 +73,17 @@ actor MicrophoneSource: AudioSource {
         errorContinuation = errCaptured
     }
 
+    /// Returns the AsyncStream tied to the most recent `start(...)` call.
+    /// Each meeting gets a fresh stream/continuation pair; consumers
+    /// (`AudioCaptureService.micSttStream` → `TranscriptionService`) read
+    /// this AFTER `start(...)` returns to pick up the per-meeting
+    /// instance.
+    nonisolated var sttStream: AsyncStream<PCMChunk> {
+        streamLock.lock()
+        defer { streamLock.unlock() }
+        return _sttStream
+    }
+
     func start(archivalURL: URL) async throws {
         guard engine == nil else { throw MicrophoneSourceError.alreadyStarted }
         self.archivalURL = archivalURL
@@ -71,7 +95,20 @@ actor MicrophoneSource: AudioSource {
             throw MicrophoneSourceError.formatUnavailable
         }
 
-        let handler = try makeTapHandler(archivalURL: archivalURL, inputFormat: inputFormat)
+        // Recreate the (sttStream, sttContinuation) pair for this
+        // meeting. The previous continuation (if any — from a prior
+        // meeting) is finished here so any lingering consumer's
+        // for-await exits cleanly. The new tap handler captures the
+        // fresh continuation; the new consumer (TranscriptionService
+        // bridge for the next meeting) reads `sttStream` AFTER this
+        // start returns and gets the fresh AsyncStream. See BUG 6 fix.
+        let freshContinuation = recreateSttStreamPair()
+
+        let handler = try makeTapHandler(
+            archivalURL: archivalURL,
+            inputFormat: inputFormat,
+            sttContinuation: freshContinuation
+        )
         tapHandler = handler
 
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { buffer, time in
@@ -100,7 +137,32 @@ actor MicrophoneSource: AudioSource {
         installConfigurationChangeObserver(engine: engine)
     }
 
-    private func makeTapHandler(archivalURL: URL, inputFormat: AVAudioFormat) throws -> MicrophoneTapHandler {
+    /// Closes the existing `sttContinuation` (signals any prior consumer
+    /// to exit) and creates a fresh `(AsyncStream, Continuation)` pair.
+    /// Returns the new continuation for the caller (`start`) to hand
+    /// to the new tap handler. The new `_sttStream` is now what
+    /// `sttStream` returns to consumers.
+    private func recreateSttStreamPair() -> AsyncStream<PCMChunk>.Continuation {
+        var newCont: AsyncStream<PCMChunk>.Continuation?
+        let newStream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
+            newCont = cont
+        }
+        guard let captured = newCont else {
+            preconditionFailure("AsyncStream did not yield continuation")
+        }
+        streamLock.lock()
+        sttContinuation.finish()
+        _sttStream = newStream
+        sttContinuation = captured
+        streamLock.unlock()
+        return captured
+    }
+
+    private func makeTapHandler(
+        archivalURL: URL,
+        inputFormat: AVAudioFormat,
+        sttContinuation: AsyncStream<PCMChunk>.Continuation
+    ) throws -> MicrophoneTapHandler {
         let errorContinuation = errorContinuation
         let writer = try AudioFileWriter(
             url: archivalURL,

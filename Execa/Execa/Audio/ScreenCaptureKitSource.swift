@@ -22,17 +22,25 @@ actor ScreenCaptureKitSource: AudioSource {
     private var output: SCKAudioOutput?
     private var tapHandler: SCKTapHandler?
 
-    nonisolated let sttStream: AsyncStream<PCMChunk>
-    private nonisolated let sttContinuation: AsyncStream<PCMChunk>.Continuation
+    /// Per-meeting `(AsyncStream, Continuation)` pair. See the matching
+    /// comment + design rationale on `MicrophoneSource._sttStream` —
+    /// same back-to-back-meetings BUG 6 fix applies here. Meeting 1's
+    /// `SCKTapHandler.close()` finishes the previous continuation;
+    /// Meeting 2's fresh tap handler captures the new one created in
+    /// `start(...)`.
+    private nonisolated(unsafe) var _sttStream: AsyncStream<PCMChunk>
+    private nonisolated(unsafe) var sttContinuation: AsyncStream<PCMChunk>.Continuation
+    private nonisolated let streamLock = NSLock()
+
     nonisolated let errorStream: AsyncStream<MeetingError>
     private nonisolated let errorContinuation: AsyncStream<MeetingError>.Continuation
 
     init() {
         var sttCont: AsyncStream<PCMChunk>.Continuation?
-        let sttStream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
+        let initialStream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
             sttCont = cont
         }
-        self.sttStream = sttStream
+        _sttStream = initialStream
         guard let sttCaptured = sttCont else {
             preconditionFailure("AsyncStream did not yield continuation")
         }
@@ -49,11 +57,20 @@ actor ScreenCaptureKitSource: AudioSource {
         errorContinuation = errCaptured
     }
 
+    nonisolated var sttStream: AsyncStream<PCMChunk> {
+        streamLock.lock()
+        defer { streamLock.unlock() }
+        return _sttStream
+    }
+
     func start(archivalURL: URL) async throws {
         guard stream == nil else { throw ScreenCaptureKitSourceError.alreadyStarted }
         let filter = try await Self.contentFilter()
         let config = Self.streamConfiguration()
-        let handler = try makeTapHandler(archivalURL: archivalURL)
+        // Recreate the (sttStream, sttContinuation) pair for this meeting
+        // — see MicrophoneSource for design rationale (BUG 6 fix).
+        let freshContinuation = recreateSttStreamPair()
+        let handler = try makeTapHandler(archivalURL: archivalURL, sttContinuation: freshContinuation)
         let scStream = SCStream(filter: filter, configuration: config, delegate: nil)
         let output = SCKAudioOutput(handler: handler)
         do {
@@ -77,7 +94,30 @@ actor ScreenCaptureKitSource: AudioSource {
         tapHandler = handler
     }
 
-    private func makeTapHandler(archivalURL: URL) throws -> SCKTapHandler {
+    /// Closes the existing `sttContinuation` (signals any prior consumer
+    /// to exit) and creates a fresh `(AsyncStream, Continuation)` pair.
+    /// Returns the new continuation for the caller (`start`) to hand
+    /// to the new SCKTapHandler.
+    private func recreateSttStreamPair() -> AsyncStream<PCMChunk>.Continuation {
+        var newCont: AsyncStream<PCMChunk>.Continuation?
+        let newStream = AsyncStream<PCMChunk>(bufferingPolicy: .bufferingNewest(64)) { cont in
+            newCont = cont
+        }
+        guard let captured = newCont else {
+            preconditionFailure("AsyncStream did not yield continuation")
+        }
+        streamLock.lock()
+        sttContinuation.finish()
+        _sttStream = newStream
+        sttContinuation = captured
+        streamLock.unlock()
+        return captured
+    }
+
+    private func makeTapHandler(
+        archivalURL: URL,
+        sttContinuation: AsyncStream<PCMChunk>.Continuation
+    ) throws -> SCKTapHandler {
         let errorContinuation = errorContinuation
         let writer = try AudioFileWriter(
             url: archivalURL,

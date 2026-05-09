@@ -1,3 +1,4 @@
+import AVFoundation
 @testable import Execa
 import Foundation
 import GRDB
