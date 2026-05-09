@@ -8,7 +8,7 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 
 ## Current status
 
-**Phase 2 complete (tagged `phase-2`).** Phase 0 + Phase 1 + Phase 2 are landed end-to-end. The app captures mic + system audio (Phase 1), runs both streams through Sarvam Saarika streaming STT, and renders a live transcript in a floating window during a meeting. Speaker labels are post-hoc batch-driven (Path B): live streaming collapses each stream to a single label (mic → `displayName`, system → `"Remote"`); diarized labels arrive via Sarvam's batch API at meeting-stop in Phase 3. The missing-Sarvam-key gate, wizard STT key step, 30 s reconnect ring buffer, exponential-backoff retry, and Resume action for reconnect-exhausted state are all wired. Sarvam wire contract (URL, auth, JSON+base64 framing, single-message-per-utterance behaviour) was discovered via a live probe (`scripts/sarvam-probe.swift`) and locked into `DECISIONS.md`. Next step: Phase 3.
+**Phase 2 complete (tagged `phase-2`). Ready for Phase 3.** Phase 0 + Phase 1 + Phase 2 are landed end-to-end. The app captures mic + system audio (Phase 1), runs both streams through Sarvam Saarika streaming STT, and renders a live transcript in a floating window during a meeting. Speaker labels are post-hoc batch-driven (Path B): live streaming collapses each stream to a single label (mic → `displayName`, system → `"Remote"`); diarized labels arrive via Sarvam's batch API at meeting-stop in Phase 3. The missing-Sarvam-key gate, wizard STT key step, 30 s reconnect ring buffer, exponential-backoff retry, Resume action for reconnect-exhausted state, and per-meeting `AsyncStream` recreation (so back-to-back meetings in the same process both transcribe) are all wired. Sarvam wire contract (URL, auth, JSON+base64 framing, single-message-per-utterance behaviour) was discovered via a live probe (`scripts/sarvam-probe.swift`) and locked into `DECISIONS.md`. One known issue: Resume after bad-key replacement requires app relaunch (see Phase 2 known issues below).
 
 ---
 
@@ -69,9 +69,17 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 **Known consequence (carried over from Phase 1 closeout):**
 - In speaker-mode (no headphones), mic-stream STT will transcribe remote-participant audio bleeding through speakers and tag it as "You". The same audio also arrives via system-stream STT correctly tagged with diarization. Result: doubled transcript entries in speaker mode. Mitigation deferred (see `DECISIONS.md` 2026-05-07 Phase 1 closeout).
 
+**Known issue — Resume after bad-key replacement requires app relaunch:**
+- Repro: start a meeting with a bogus Sarvam key → reconnect attempts exhaust → "Transcription stopped" banner with Resume button. While the meeting is still live, replace the Keychain key with a valid one (`security add-generic-password -s com.anandthakur.execa.sarvam -a default -w '<real>' -U`). Click Resume.
+- Expected: transcription resumes mid-meeting.
+- Actual: pill briefly shows "Connected" but transcripts don't appear; subsequent meetings in the same process also fail. Workaround: quit and relaunch — the next meeting transcribes normally.
+- Suspected root cause: stale `URLSession` or `URLSessionWebSocketTask` state cached after the bogus-key auth failures, surviving the per-provider tear-down. Each relaunch instantiates a fresh `URLSession` and the issue clears. Distinct from the BUG 5 in-process Resume (network-drop → reconnect-exhaust → resume), which the `retry()` path covers.
+- Acceptable for v1: the bogus-key path is an explicit user error and the workaround is fast (Quit → Start). Revisit in Phase 6 when `TranscriptionRouter` introduces failover and the URLSession ownership model gets a fresh look. Tracked in DECISIONS.md if it surfaces as a real workflow blocker.
+
 **Acceptance:**
 - Live transcript displays within 2 s of first speech.
 - Network drop mid-meeting → banner appears, audio buffered, transcript catches up on reconnect.
+- Back-to-back meetings in the same process both transcribe (the BUG 6 gate). Covered by `BackToBackMeetingTests.backToBackMeetingsBothTranscribe` and a manual smoke step.
 
 ---
 
