@@ -53,11 +53,17 @@ struct MenuBarLabel: View {
 
 struct MenuBarMenu: View {
     let state: MeetingState
+    /// Phase 3 Decision 15 / Revision 4: when non-nil and we're in
+    /// `.idle`, the menu shows "Open last meeting" pointing at this
+    /// meeting's `MeetingDetailView`. Cleared by the next
+    /// `start(meetingID:)`; no TTL.
+    let lastEndedMeetingID: String?
     let onStart: () -> Void
     let onStop: () -> Void
     let onOpenScreenSettings: () -> Void
     let onOpenMicSettings: () -> Void
     let onShowLiveWindow: () -> Void
+    let onOpenLastMeeting: (String) -> Void
     let onDismissError: () -> Void
 
     var body: some View {
@@ -65,6 +71,9 @@ struct MenuBarMenu: View {
         case .idle:
             Button("Start Meeting") { onStart() }
                 .keyboardShortcut("R", modifiers: [.command, .shift])
+            if let lastEndedMeetingID {
+                Button("Open last meeting") { onOpenLastMeeting(lastEndedMeetingID) }
+            }
             Divider()
             Button("Quit execa") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("Q", modifiers: .command)

@@ -249,6 +249,21 @@ The full reasoning lives in `meeting-app-spec.md`; this file is the index so Cla
 - **Tested by:** `SpeakerLabelManagerMergeSplitTests.mergeCrossSourceWorksAndAggregatesTalkTime` (mic merged into system, talk-time aggregates across both, alias's own key disappears from the aggregated map).
 - **Status:** Active.
 
+## 2026-05-09 — Phase 3: voice-sample playback rule for merged speakers (Revision 5)
+
+- **Decision:** When the user clicks "Voice sample" on a `speakers` row that has been merged via `merged_into_speaker_id`, `SpeakerVoiceSamplePlayer.windowToPlay` walks the alias chain to the canonical (un-merged) speaker via `SpeakerQueries.canonicalSpeakerID`, fetches **the canonical speaker's** most-recent finalized `transcript_segments` row, and plays a 3 s window ending at that segment's `end_ms`. The audio bytes are sourced from the WAV named by **the segment row's** `source` (mic.wav or system.wav) — NOT the canonical speaker row's `source`. After a cross-source merge the two can differ; the segment-row source is what the audio file reflects.
+- **Alternatives considered:** (a) For a merged alias, play the alias row's own segment(s) (which don't exist post-merge — segments are reattached only on split, not on merge — so this would always return no-data). (b) Play a fixed segment (e.g. always pick the first segment for the canonical speaker). (c) Walk the alias and pick the canonical's most-recent segment (chosen).
+- **Why (c):** "Most-recent" tracks user intent — they're typically reviewing the latest evidence for a label decision. Mid-meeting the player is gated off entirely (Decision 5 — WAVs are still being written) so this only runs post-stop. Tested by `SpeakerVoiceSamplePlayerTests.mergedSpeakerWalksAliasChain` and `.crossSourceMergeSourcesBytesFromSegmentSource`. Source-clamp and start-at-0 edge cases tested by `.clampsStartAtZeroForVeryEarlySegments`.
+- **Status:** Active.
+
+## 2026-05-09 — Phase 3: post-batch announcement is single-button "Got it" toast (Revision 1)
+
+- **Decision:** When the diarization status flips to `.completed` while `MeetingDetailView` is on screen, a single-button "Got it" announcement banner appears at the top of the view: green checkmark + "Speaker labels are ready." + Got it button. Auto-dismisses after 5 s if the user doesn't interact. There is no "Apply" or "Dismiss" choice — Decision 2's authoritative-replace semantics make the swap automatic and irreversible (the DB is already updated with the new labels by the time the announcement fires), so there's nothing to apply or dismiss.
+- **Alternatives considered:** (a) Two-button "Apply / Dismiss" banner — original Phase 3 plan, before the round-2 simplification round. (b) No banner — DB just updates silently. (c) Single-button "Got it" announcement (chosen).
+- **Why (c):** (a) implies the user has a meaningful choice to make, but they don't — Decision 2 means the swap already ran. Putting an "Apply" button on a fait accompli is misleading. (b) is too quiet — without an indication, the user might miss that batch labels arrived (the speaker list quietly changing while they were reading the transcript is jarring). (c) splits the difference: clear acknowledgement, no false agency, auto-dismiss so it never blocks.
+- **Implementation:** `MeetingDetailView.showCompletedAnnouncement` boolean flips to `true` on the `.onChange` of `DiarizationStatusStore.status(forMeetingID:)`; a Task sleeps 5 s then flips back. Banner uses `Color.green.opacity(0.08)` background with the checkmark icon.
+- **Status:** Active.
+
 ## 2026-05-09 — Phase 3: per-stream batch submission (mic.wav + system.wav as two calls)
 
 - **Decision:** `DiarizationService.runForMeeting` submits `mic.wav` and `system.wav` to the Sarvam batch endpoint as two **separate** jobs (concurrently, two calls), not as a single job containing both files, and not against the downmixed `master.flac`. Each per-stream result feeds into the DB with `source` already known per file.

@@ -47,10 +47,19 @@ struct ExecaApp: App {
             }
         }
 
+        WindowGroup(id: "execa-meeting-detail", for: String.self) { $meetingID in
+            if let coordinator, let id = meetingID {
+                MeetingDetailView(coordinator: coordinator, meetingID: id)
+            } else {
+                ProgressView("Starting execa…").padding()
+            }
+        }
+
         MenuBarExtra {
             if let coordinator {
                 MenuBarMenu(
                     state: meetingState,
+                    lastEndedMeetingID: coordinator.audioCapture.lastEndedMeetingID,
                     onStart: { Task { try? await coordinator.startMeeting() } },
                     onStop: { Task { try? await coordinator.stopMeeting() } },
                     onOpenScreenSettings: {
@@ -61,6 +70,9 @@ struct ExecaApp: App {
                     },
                     onShowLiveWindow: {
                         openWindow(id: "execa-live-meeting")
+                    },
+                    onOpenLastMeeting: { meetingID in
+                        openWindow(id: "execa-meeting-detail", value: meetingID)
                     },
                     onDismissError: {
                         Task { await coordinator.dismissError() }
@@ -76,13 +88,28 @@ struct ExecaApp: App {
 
     private func observeMeetingState(_ coordinator: AppCoordinator) async {
         var lastDiskFullAlertShown = false
+        var previousState: MeetingState = .idle
         for await newState in coordinator.audioCapture.stateStream {
+            let priorState = previousState
             meetingState = newState
+            previousState = newState
             switch newState {
             case .recording:
                 openWindow(id: "execa-live-meeting")
             case .idle:
                 dismissWindow(id: "execa-live-meeting")
+                // Auto-open the meeting detail view on a clean stop
+                // (transitioning from .savingMeeting / .stopping to
+                // .idle, with a just-ended meeting ID set). 200 ms
+                // delay matches Phase 3 plan to avoid stealing focus
+                // from LiveMeetingView's dismiss animation.
+                if case .savingMeeting = priorState,
+                   let meetingID = coordinator.audioCapture.lastEndedMeetingID {
+                    Task {
+                        try? await Task.sleep(nanoseconds: 200_000_000)
+                        openWindow(id: "execa-meeting-detail", value: meetingID)
+                    }
+                }
             default:
                 break
             }
