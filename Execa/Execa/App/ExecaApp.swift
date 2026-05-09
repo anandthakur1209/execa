@@ -39,7 +39,8 @@ struct ExecaApp: App {
             if let coordinator {
                 LiveMeetingView(
                     coordinator: coordinator,
-                    store: coordinator.transcriptStore
+                    store: coordinator.transcriptStore,
+                    meetingState: meetingState
                 )
             } else {
                 ProgressView("Starting execa…").padding()

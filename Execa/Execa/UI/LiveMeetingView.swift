@@ -15,8 +15,15 @@ import SwiftUI
 struct LiveMeetingView: View {
     let coordinator: AppCoordinator
     let store: TranscriptStore
-
-    @State private var meetingState: MeetingState = .idle
+    /// Current `MeetingState`, propagated down from `ExecaApp`'s `@State`.
+    /// **Do not** open a `for await` loop on `coordinator.audioCapture
+    /// .stateStream` from this view — that stream is single-consumer and
+    /// adding a second iterator was the cause of the BUG 1 "Saving
+    /// meeting…" deadlock. ExecaApp is the sole iterator; the
+    /// `WindowGroup` body re-reads on every `@State` change and
+    /// propagates the new value into this struct, so SwiftUI
+    /// invalidation handles the live update for free.
+    let meetingState: MeetingState
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,11 +37,6 @@ struct LiveMeetingView: View {
         }
         .frame(minWidth: 480, minHeight: 360)
         .navigationTitle("Live Meeting")
-        .task {
-            for await state in coordinator.audioCapture.stateStream {
-                meetingState = state
-            }
-        }
     }
 
     private var anyStopped: Bool {

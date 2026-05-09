@@ -10,8 +10,48 @@ actor AudioCaptureService {
 
     /// State transitions are emitted to subscribers as soon as they happen.
     /// The menu bar binds its label and items off this stream.
-    nonisolated let stateStream: AsyncStream<MeetingState>
+    ///
+    /// **Single-consumer contract.** AsyncStream events are split between
+    /// concurrent iterators (whichever pulls first wins each event); two
+    /// `for await` loops on this stream produce a hard-to-debug deadlock
+    /// where one consumer routinely misses `.idle` and the menu bar gets
+    /// stuck on "Saving meeting…". The Phase 2 manual smoke surfaced
+    /// exactly that bug — `ExecaApp.observeMeetingState(_:)` is the sole
+    /// iterator; child views (LiveMeetingView, etc.) receive the current
+    /// `MeetingState` as a parameter from ExecaApp's `@State`. The
+    /// `#if DEBUG` getter guard below trips on a second iterator
+    /// creation.
+    private nonisolated let _stateStream: AsyncStream<MeetingState>
     private nonisolated let stateContinuation: AsyncStream<MeetingState>.Continuation
+
+    nonisolated var stateStream: AsyncStream<MeetingState> {
+        #if DEBUG
+        // Bumps on every property read, not every iterator creation —
+        // good enough for the current codebase (one read in
+        // `ExecaApp.observeMeetingState`). If a future change introduces
+        // a non-iterating read of this property and starts tripping a
+        // false positive, move the counter into a wrapping
+        // `AsyncSequence` that bumps inside `makeAsyncIterator()` —
+        // more code, fewer false positives.
+        stateStreamReadGuard.lock()
+        stateStreamReadCount += 1
+        let count = stateStreamReadCount
+        stateStreamReadGuard.unlock()
+        assert(count == 1, """
+        AudioCaptureService.stateStream is single-consumer. A second \
+        read was made (likely a second `for await` iterator) — pass \
+        `meetingState` from ExecaApp down to child views instead of \
+        opening another for-await loop. See Phase 2 manual-smoke fix \
+        for BUG 1.
+        """)
+        #endif
+        return _stateStream
+    }
+
+    #if DEBUG
+    private nonisolated let stateStreamReadGuard = NSLock()
+    private nonisolated(unsafe) var stateStreamReadCount = 0
+    #endif
 
     private(set) var state: MeetingState = .idle {
         didSet {
@@ -37,7 +77,7 @@ actor AudioCaptureService {
         let stream = AsyncStream<MeetingState>(bufferingPolicy: .bufferingNewest(8)) { cont in
             capturedContinuation = cont
         }
-        stateStream = stream
+        _stateStream = stream
         guard let continuation = capturedContinuation else {
             preconditionFailure("AsyncStream did not yield continuation")
         }
