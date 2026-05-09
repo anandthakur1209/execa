@@ -63,6 +63,34 @@ actor AudioCaptureService {
     private var currentDirectory: URL?
     private var errorObservationTask: Task<Void, Never>?
 
+    /// ULID of the most-recently-stopped meeting, or `nil` if no meeting
+    /// has ended this app session (or a new meeting has since started).
+    /// Lock-protected stored property so callers outside the actor can
+    /// read it synchronously — `MenuBarController` (Phase 3 commit 7)
+    /// uses it to gate the "Open last meeting" item, and
+    /// `AppCoordinator.stopMeeting` (Phase 3 commit 4) uses it to fire
+    /// the post-meeting batch diarization.
+    ///
+    /// **Lifecycle:** set in `stop()` to the just-ended meeting's ULID
+    /// **before** flipping state to `.idle`; cleared at the top of
+    /// `start(meetingID:)`. No TTL Task, no time-based expiry — Phase 3
+    /// Revision 4 explicitly drops the originally-planned 1-hour TTL in
+    /// favor of "cleared by next meeting start" semantics. Phase 5's
+    /// History view replaces the menu-bar affordance entirely.
+    private nonisolated let lastEndedMeetingIDLock = NSLock()
+    private nonisolated(unsafe) var _lastEndedMeetingID: String?
+    nonisolated var lastEndedMeetingID: String? {
+        lastEndedMeetingIDLock.lock()
+        defer { lastEndedMeetingIDLock.unlock() }
+        return _lastEndedMeetingID
+    }
+
+    private nonisolated func setLastEndedMeetingID(_ value: String?) {
+        lastEndedMeetingIDLock.lock()
+        _lastEndedMeetingID = value
+        lastEndedMeetingIDLock.unlock()
+    }
+
     init(
         mic: AudioSource,
         system: AudioSource,
@@ -122,6 +150,10 @@ actor AudioCaptureService {
         guard case .idle = state else {
             throw MeetingError.streamFailed("AudioCaptureService is not idle (state=\(state))")
         }
+        // Clear the "last ended" sentinel so a new meeting doesn't
+        // cohabit with the previous one's ID. Phase 3 Revision 4: no
+        // TTL — only the next-meeting-starts boundary clears this.
+        setLastEndedMeetingID(nil)
         state = .starting
 
         // Permission gate. Must run before any source is touched so the menu
@@ -236,6 +268,11 @@ actor AudioCaptureService {
 
         currentMeetingID = nil
         currentDirectory = nil
+        // Set the "last ended" sentinel before transitioning to .idle
+        // so any observer reacting to the .idle event (e.g.
+        // `AppCoordinator.stopMeeting`'s post-stop diarization
+        // trigger) reads the meeting ID without a race.
+        setLastEndedMeetingID(meetingID)
         state = .idle
         return directory
     }

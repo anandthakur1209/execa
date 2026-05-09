@@ -15,10 +15,15 @@ actor AppCoordinator {
     nonisolated let audioCapture: AudioCaptureService
     nonisolated let transcription: TranscriptionService
     nonisolated let transcriptStore: TranscriptStore
+    nonisolated let diarizationStatusStore: DiarizationStatusStore
+    private let diarization: DiarizationService
     private let transcriptionProviderFactory: TranscriptionProviderFactory
 
     init(
-        transcriptionProviderFactory: @escaping TranscriptionProviderFactory = { _, key in SarvamProvider(apiKey: key) }
+        transcriptionProviderFactory: @escaping TranscriptionProviderFactory = { _, key in
+            SarvamProvider(apiKey: key)
+        },
+        diarizeFunction: DiarizationService.DiarizeFunction? = nil
     ) async throws {
         let database = try Database.make()
         self.database = database
@@ -38,6 +43,41 @@ actor AppCoordinator {
         self.transcriptStore = transcriptStore
         transcription = TranscriptionService(store: transcriptStore)
         self.transcriptionProviderFactory = transcriptionProviderFactory
+
+        // Diarization. Default `diarizeFunction` reads the Sarvam key
+        // from Keychain at call time and creates a fresh
+        // `SarvamBatchClient` per invocation — same per-call style
+        // the streaming `transcriptionProviderFactory` uses, and lets
+        // a Keychain key updated mid-session take effect on the next
+        // diarization without an app restart.
+        let statusStore = await DiarizationStatusStore()
+        diarizationStatusStore = statusStore
+        let resolvedDiarize: DiarizationService.DiarizeFunction
+        if let injected = diarizeFunction {
+            resolvedDiarize = injected
+        } else {
+            // Capture `keychain` (a value-typed wrapper around the
+            // SecItem APIs) so the closure stays Sendable.
+            let keychainCapture = keychain
+            resolvedDiarize = { @Sendable wavURL, languageCode in
+                let serviceName = KeychainStore.serviceName(forProvider: "sarvam")
+                let key = (try? keychainCapture.get(service: serviceName, account: "default")) ?? nil
+                guard let key, !key.isEmpty else {
+                    throw SarvamBatchClientError.uploadFailed(
+                        statusCode: 0,
+                        message: "no Sarvam key available for batch diarization"
+                    )
+                }
+                let client = SarvamBatchClient(apiKey: key)
+                return try await client.diarize(wavURL: wavURL, languageCode: languageCode)
+            }
+        }
+        diarization = DiarizationService(
+            database: database,
+            statusStore: statusStore,
+            settings: settings,
+            diarize: resolvedDiarize
+        )
     }
 
     func currentDisplayName() async throws -> String? {
@@ -109,7 +149,46 @@ actor AppCoordinator {
         // Stop transcription first so providers see EOS and flush, before
         // audio capture closes its archival writers.
         await transcription.stop()
-        _ = try await audioCapture.stop()
+        let stoppedDirectory = try await audioCapture.stop()
+
+        // Phase 3 auto-trigger: kick off post-meeting batch diarization
+        // if the `auto_diarization` setting allows. Fire-and-forget so
+        // the UI returns to `.idle` promptly; the
+        // `DiarizationStatusStore` publishes status updates as the
+        // batch progresses (`MeetingDetailView` observes them).
+        guard let stoppedDirectory else { return }
+        guard let endedMeetingID = audioCapture.lastEndedMeetingID else { return }
+        let auto = await (try? settings.autoDiarization()) ?? true
+        guard auto else { return }
+        let micWAV = stoppedDirectory.appendingPathComponent("mic.wav")
+        let systemWAV = stoppedDirectory.appendingPathComponent("system.wav")
+        let diarization = diarization
+        Task.detached {
+            await diarization.runForMeeting(
+                meetingID: endedMeetingID,
+                micWAV: micWAV,
+                systemWAV: systemWAV
+            )
+        }
+    }
+
+    /// Re-run diarization on demand (Phase 3 commit 7's
+    /// "Re-run diarization" button + commit 4's failure-retry path).
+    /// Always available regardless of the `auto_diarization` setting.
+    func rerunDiarization(meetingID: String) async {
+        let directory: URL
+        do {
+            directory = try MeetingsDirectory.url(forMeetingID: meetingID)
+        } catch {
+            return
+        }
+        let micWAV = directory.appendingPathComponent("mic.wav")
+        let systemWAV = directory.appendingPathComponent("system.wav")
+        await diarization.runForMeeting(
+            meetingID: meetingID,
+            micWAV: micWAV,
+            systemWAV: systemWAV
+        )
     }
 
     /// Wired to the menu bar's "Dismiss" button when the state machine is
