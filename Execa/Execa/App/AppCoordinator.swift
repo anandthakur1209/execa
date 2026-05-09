@@ -112,37 +112,27 @@ actor AppCoordinator {
         _ = try await audioCapture.stop()
     }
 
-    /// Re-attaches transcription providers after a reconnect-exhausted
-    /// state. Pulls the live meeting context from `audioCapture.state` —
-    /// no-op if the meeting isn't currently `.recording`. Doesn't reset
-    /// the transcript store, so the existing transcript is preserved
-    /// and new utterances append from "now" onward. Audio captured
-    /// during the dead window is unrecoverable.
+    /// Wired to the menu bar's "Dismiss" button when the state machine is
+    /// in `.error(...)`. Sends the state machine back to `.idle` so the
+    /// menu reverts to the default "Start Meeting" layout. The previous
+    /// implementation re-invoked `startMeeting()`, which immediately
+    /// re-tripped any preflight error (e.g. missing Sarvam key) — making
+    /// Dismiss visibly inert.
+    func dismissError() async {
+        await audioCapture.clearError()
+    }
+
+    /// Asks each existing transcription provider to restart its
+    /// connection logic. No-op if not currently `.recording`. The
+    /// transcript store is preserved; the audio-producer tasks are
+    /// preserved (so audio captured during the dead window stays
+    /// available in each provider's ring buffer); only the connection
+    /// supervisors are restarted. Audio captured during the dead
+    /// window flows out via the new socket once it connects, via the
+    /// supervisor's normal ring-drain path.
     func resumeTranscription() async {
         let state = await audioCapture.state
-        guard case let .recording(meetingID, startedAt) = state else { return }
-        let storedKey: String?
-        do {
-            storedKey = try keychain.get(
-                service: KeychainStore.serviceName(forProvider: "sarvam"),
-                account: "default"
-            )
-        } catch {
-            storedKey = nil
-        }
-        guard let validKey = storedKey, !validKey.isEmpty else { return }
-        let displayName = await (try? settings.string(forKey: .displayName)) ?? nil
-        let factory = transcriptionProviderFactory
-        let context = TranscriptionService.StartContext(
-            meetingID: meetingID,
-            startedAt: startedAt,
-            displayName: displayName,
-            micStream: audioCapture.micSttStream,
-            systemStream: audioCapture.systemSttStream
-        )
-        try? await transcription.resume(
-            providerFactory: { source in factory(source, validKey) },
-            context: context
-        )
+        guard case .recording = state else { return }
+        await transcription.retry()
     }
 }

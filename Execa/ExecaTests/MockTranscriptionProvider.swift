@@ -20,17 +20,21 @@ final class MockTranscriptionProvider: TranscriptionProvider, @unchecked Sendabl
 
     private let lock = NSLock()
     private let scripted: [TranscriptionEvent]
+    private let scriptedAfterRetry: [TranscriptionEvent]
     private let interEventDelayNs: UInt64
     private var emitterTask: Task<Void, Never>?
     private var drainTask: Task<Void, Never>?
+    private var retryTask: Task<Void, Never>?
     private var chunkCount = 0
 
     init(
         events: [TranscriptionEvent],
+        eventsAfterRetry: [TranscriptionEvent] = [],
         interEventDelayMs: UInt64 = 0,
         providesAbsoluteTimestamps: Bool = true
     ) {
         scripted = events
+        scriptedAfterRetry = eventsAfterRetry
         interEventDelayNs = interEventDelayMs * 1_000_000
         self.providesAbsoluteTimestamps = providesAbsoluteTimestamps
 
@@ -79,12 +83,37 @@ final class MockTranscriptionProvider: TranscriptionProvider, @unchecked Sendabl
         lock.lock()
         let emit = emitterTask
         let drain = drainTask
+        let retry = retryTask
         emitterTask = nil
         drainTask = nil
+        retryTask = nil
         lock.unlock()
         emit?.cancel()
         drain?.cancel()
+        retry?.cancel()
         continuation.finish()
+    }
+
+    /// Emits the `eventsAfterRetry` array passed at init, mirroring
+    /// `SarvamProvider.retry()`'s "more events flow through the same
+    /// stream" semantic without needing an actual reconnect loop.
+    func retry() async {
+        let toEmit = scriptedAfterRetry
+        guard !toEmit.isEmpty else { return }
+        let cont = continuation
+        let delay = interEventDelayNs
+        let task = Task {
+            for event in toEmit {
+                if Task.isCancelled { return }
+                cont.yield(event)
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+            }
+        }
+        lock.lock()
+        retryTask = task
+        lock.unlock()
     }
 
     /// Number of `PCMChunk`s pushed into the audio stream. Useful for

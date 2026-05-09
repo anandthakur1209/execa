@@ -61,6 +61,9 @@ struct ExecaApp: App {
                     },
                     onShowLiveWindow: {
                         openWindow(id: "execa-live-meeting")
+                    },
+                    onDismissError: {
+                        Task { await coordinator.dismissError() }
                     }
                 )
             } else {

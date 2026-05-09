@@ -106,6 +106,17 @@ actor AudioCaptureService {
         state = .error(error)
     }
 
+    /// Clears a preflight error and returns the state machine to `.idle`.
+    /// Wired to the menu bar's "Dismiss" button so the user can leave
+    /// the error state without quitting the app. No-op if not currently
+    /// in an error state — protects an in-progress meeting from being
+    /// silently aborted by a misrouted Dismiss click.
+    func clearError() {
+        if case .error = state {
+            state = .idle
+        }
+    }
+
     @discardableResult
     func start(meetingID: String) async throws -> URL {
         guard case .idle = state else {

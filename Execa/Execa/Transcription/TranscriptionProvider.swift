@@ -20,6 +20,15 @@ protocol TranscriptionProvider: Sendable {
         audioStream: AsyncStream<PCMChunk>
     ) async throws
     func stop() async
+    /// Re-attempts the connect → drain → receive cycle without touching
+    /// the audio-producer side of the pipeline (the task that's reading
+    /// from `audioStream` and pushing into the in-provider ring
+    /// buffer). Called by the LiveMeetingView "Resume" button after the
+    /// supervisor previously emitted `.error(.reconnectExhausted)`. Default
+    /// is a no-op for providers that don't have a separate
+    /// supervisor-vs-producer split (mocks, future single-task
+    /// providers).
+    func retry() async
     var events: AsyncStream<TranscriptionEvent> { get }
     /// Whether `TranscriptToken.startMs` / `endMs` represent absolute
     /// positions in the audio stream the provider received (`true`), or
@@ -39,6 +48,13 @@ extension TranscriptionProvider {
     var providesAbsoluteTimestamps: Bool {
         true
     }
+
+    /// Default: no-op. Providers with a connect-supervisor / audio-producer
+    /// split (Sarvam) override this to restart only the supervisor; the
+    /// producer task and the inbound `AsyncStream<PCMChunk>` consumer
+    /// stay alive across the call so audio captured during the dead
+    /// window doesn't have to find a new home.
+    func retry() async {}
 }
 
 /// Normalized event shape that TranscriptionService and TranscriptStore see,

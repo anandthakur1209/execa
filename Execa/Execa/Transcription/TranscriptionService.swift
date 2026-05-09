@@ -48,16 +48,25 @@ actor TranscriptionService {
         try await attachProviders(providerFactory: providerFactory, context: context)
     }
 
-    /// Re-attaches providers without resetting the transcript store.
-    /// Used by the LiveMeetingView "Resume" button when the previous
-    /// providers exhausted their reconnect budget. The same audio
-    /// streams keep flowing — new providers pick up from wherever the
-    /// `AsyncStream` buffer is, so audio captured during the dead window
-    /// is missed but the meeting continues without a transcript reset.
-    func resume(providerFactory: ProviderFactory, context: StartContext) async throws {
-        // Tear down whatever's left of the old provider trees first.
-        await stopProvidersOnly()
-        try await attachProviders(providerFactory: providerFactory, context: context)
+    /// Asks each existing provider to restart its connection logic
+    /// (Sarvam: the supervisor task; mocks: emit scripted post-retry
+    /// events). The providers themselves stay intact across the call —
+    /// no new instances are created, no audio-producer tasks are
+    /// torn down, no `AsyncStream<PCMChunk>` consumers are swapped.
+    /// This is what the LiveMeetingView "Resume" button calls when
+    /// connection retries previously exhausted.
+    ///
+    /// **Why not recreate the provider tree** (the original Phase 2
+    /// design): swapping providers means the new instance's
+    /// audio-producer task must read from the same upstream
+    /// `AsyncStream<PCMChunk>` that the old producer was reading. In
+    /// practice that path drops audio — `AsyncStream` is de-facto
+    /// single-consumer, so the new for-await loop doesn't reliably
+    /// receive new chunks. Keeping the producer alive across retry
+    /// avoids the issue entirely. See manual-smoke BUG 5 fix.
+    func retry() async {
+        if let mic = micProvider { await mic.retry() }
+        if let system = systemProvider { await system.retry() }
     }
 
     private func attachProviders(providerFactory: ProviderFactory, context: StartContext) async throws {
@@ -104,20 +113,6 @@ actor TranscriptionService {
         micProvider = mic
         systemProvider = system
         bridgeTasks = [micBridge, systemBridge]
-    }
-
-    /// Stops providers + bridges only. Doesn't flush the store. Used
-    /// internally by `resume()` to drop the dead provider tree before
-    /// attaching a fresh one.
-    private func stopProvidersOnly() async {
-        if let mic = micProvider { await mic.stop() }
-        if let system = systemProvider { await system.stop() }
-        for task in bridgeTasks {
-            _ = await task.value
-        }
-        bridgeTasks = []
-        micProvider = nil
-        systemProvider = nil
     }
 
     /// Stops both providers, waits for bridge tasks to drain, flushes any

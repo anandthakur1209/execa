@@ -58,6 +58,7 @@ struct MenuBarMenu: View {
     let onOpenScreenSettings: () -> Void
     let onOpenMicSettings: () -> Void
     let onShowLiveWindow: () -> Void
+    let onDismissError: () -> Void
 
     var body: some View {
         switch state {
@@ -102,7 +103,7 @@ struct MenuBarMenu: View {
             case .diskFull, .streamFailed:
                 EmptyView()
             }
-            Button("Dismiss") { onStart() } // Trying to start again clears error state.
+            Button("Dismiss") { onDismissError() }
             Divider()
             Button("Quit execa") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("Q", modifiers: .command)

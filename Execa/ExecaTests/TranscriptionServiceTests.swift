@@ -3,6 +3,18 @@ import Foundation
 import GRDB
 import Testing
 
+/// `.serialized` because two of these tests
+/// (`missingSarvamKeyHardRefusesToStartMeeting`,
+/// `dismissingMissingSTTKeyErrorReturnsToIdle`) wipe and restore the
+/// real Sarvam keychain entry. Without serialisation, parallel test
+/// execution within this suite — and against other suites that read
+/// the same key — produces wildly inconsistent results: a second test's
+/// `defer` can restore the key while a first test is still asserting
+/// it's gone, etc. Serialising within the suite isn't a complete fix
+/// (other suites can still race), but the only other keychain reader
+/// is `SarvamProviderIntegrationTests` which fails-soft (skips if no
+/// key), so per-suite serialisation suffices in practice.
+@Suite(.serialized)
 struct TranscriptionServiceTests {
     private static func tempDB() throws -> Execa.Database {
         let url = FileManager.default.temporaryDirectory
@@ -74,9 +86,11 @@ struct TranscriptionServiceTests {
         )
 
         try await service.start(providerFactory: factoryFn, context: context)
-        // 500 ms is enough headroom for both bridge tasks to drain three
-        // events apiece and complete their DB writes; 100 ms was racy.
-        try await Task.sleep(nanoseconds: 500_000_000)
+        // 2 s headroom for both bridge tasks to drain three events apiece
+        // and commit their DB writes. 500 ms was tight under
+        // `.serialized` suite load + parallel suite execution; bumped
+        // here rather than racing the wall clock.
+        try await Task.sleep(nanoseconds: 2_000_000_000)
 
         try await assertThreeFinalsLanded(database: database, meetingID: meetingID)
 
@@ -187,7 +201,13 @@ struct TranscriptionServiceTests {
         systemCont.finish()
     }
 
-    @Test func resumeAttachesNewProvidersWithoutClearingTranscript() async throws {
+    @Test func retryEmitsAdditionalEventsWithoutClearingTranscript() async throws {
+        // BUG 5 regression gate: when a provider exhausts reconnect
+        // retries and emits .error(.reconnectExhausted),
+        // TranscriptionService.retry() must restart the same provider's
+        // connection logic. Subsequent events (post-retry) must commit
+        // fresh transcript_segments rows ON TOP OF the existing ones —
+        // not reset the store.
         let database = try Self.tempDB()
         let meetingID = ULID.generate()
         try await Self.insertMeetingRow(database, id: meetingID)
@@ -204,70 +224,87 @@ struct TranscriptionServiceTests {
             systemStream: systemStream
         )
 
-        try await service.start(
-            providerFactory: Self.factoryWithMic(["first turn before outage"], terminating: true),
-            context: context
+        // Scripted mocks with both pre-exhaustion AND post-retry events.
+        // The retry() call drains the eventsAfterRetry array into the
+        // SAME events stream — same provider instance, same bridge
+        // task, no new provider construction.
+        let micMock = MockTranscriptionProvider(
+            events: [
+                .connected,
+                .final(Self.token(text: "first turn before outage")),
+                .error(.reconnectExhausted)
+            ],
+            eventsAfterRetry: [
+                .connected,
+                .final(Self.token(text: "second turn after retry"))
+            ]
         )
-        try await Task.sleep(nanoseconds: 200_000_000)
-        try await Self.assertResumeBaseline(database: database, meetingID: meetingID, store: store)
+        let systemMock = MockTranscriptionProvider(events: [.connected])
+        let factory: TranscriptionService.ProviderFactory = { source in
+            switch source {
+            case .mic: micMock
+            case .system: systemMock
+            }
+        }
 
-        try await service.resume(
-            providerFactory: Self.factoryWithMic(["second turn after resume"], terminating: false),
-            context: context
+        try await service.start(providerFactory: factory, context: context)
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        let baselineRows = try await Self.transcriptSegmentTexts(database, meetingID: meetingID)
+        #expect(baselineRows == ["first turn before outage"], "phase 1 rows were \(baselineRows)")
+        #expect(await store.connection[.mic] == .stopped)
+
+        await service.retry()
+        try await Task.sleep(nanoseconds: 500_000_000)
+
+        let postRetryRows = try await Self.transcriptSegmentTexts(database, meetingID: meetingID)
+        #expect(
+            postRetryRows == ["first turn before outage", "second turn after retry"],
+            "expected retry to append, not reset; got \(postRetryRows)"
         )
-        try await Task.sleep(nanoseconds: 200_000_000)
-        try await Self.assertResumeAppended(database: database, meetingID: meetingID, store: store)
+        #expect(await store.connection[.mic] == .connected)
 
         await service.stop()
     }
 
-    // MARK: - Resume-test helpers
-
-    /// Builds a factory that returns mocks scripted to emit one .final
-    /// per text plus an optional terminating .error(.reconnectExhausted)
-    /// on mic. System always emits just .connected.
-    private static func factoryWithMic(
-        _ texts: [String],
-        terminating: Bool
-    ) -> TranscriptionService.ProviderFactory {
-        var micEvents: [TranscriptionEvent] = [.connected]
-        for text in texts {
-            micEvents.append(.final(Self.token(text: text)))
-        }
-        if terminating {
-            micEvents.append(.error(.reconnectExhausted))
-        }
-        let micRef = MockTranscriptionProvider(events: micEvents)
-        let systemRef = MockTranscriptionProvider(events: [.connected])
-        return { source in
-            switch source {
-            case .mic: micRef
-            case .system: systemRef
+    /// BUG 4 regression gate: when the missing-Sarvam-key gate trips and
+    /// the audioCapture state is `.error(.missingSTTKey)`,
+    /// `coordinator.dismissError()` must return the state to `.idle`. The
+    /// previous Dismiss button routed through `startMeeting()`, which
+    /// re-tripped the same preflight error and left the user visibly
+    /// stuck. Lives here (not `AppCoordinatorTests`) because of the
+    /// keychain-mutation pattern — keeps all wipe-then-restore tests in
+    /// one `.serialized` suite.
+    @Test func dismissingMissingSTTKeyErrorReturnsToIdle() async throws {
+        let keychain = KeychainStore()
+        let service = KeychainStore.serviceName(forProvider: "sarvam")
+        let savedKey = (try? keychain.get(service: service, account: "default")) ?? nil
+        try? keychain.delete(service: service, account: "default")
+        defer {
+            if let savedKey {
+                try? keychain.set(savedKey, service: service, account: "default")
             }
         }
-    }
 
-    private static func assertResumeBaseline(
-        database: Execa.Database,
-        meetingID: String,
-        store: TranscriptStore
-    ) async throws {
-        let rows = try await transcriptSegmentTexts(database, meetingID: meetingID)
-        #expect(rows == ["first turn before outage"], "phase 1 rows were \(rows)")
-        #expect(await store.connection[.mic] == .stopped)
-    }
+        let coordinator = try await AppCoordinator()
+        await #expect(throws: MeetingError.self) {
+            try await coordinator.startMeeting()
+        }
 
-    private static func assertResumeAppended(
-        database: Execa.Database,
-        meetingID: String,
-        store: TranscriptStore
-    ) async throws {
-        let rows = try await transcriptSegmentTexts(database, meetingID: meetingID)
-        #expect(
-            rows == ["first turn before outage", "second turn after resume"],
-            "expected resume to append, not reset; got \(rows)"
-        )
-        #expect(await store.connection[.mic] == .connected)
+        let errorState = await coordinator.audioCapture.state
+        guard case .error(.missingSTTKey) = errorState else {
+            Issue.record("expected .error(.missingSTTKey); got \(errorState)")
+            return
+        }
+
+        await coordinator.dismissError()
+
+        let postDismissState = await coordinator.audioCapture.state
+        if case .idle = postDismissState {
+            // ok
+        } else {
+            Issue.record("expected .idle after dismissError(); got \(postDismissState)")
+        }
     }
 
     @Test func missingSarvamKeyHardRefusesToStartMeeting() async throws {

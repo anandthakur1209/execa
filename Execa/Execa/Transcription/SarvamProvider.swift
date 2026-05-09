@@ -88,6 +88,33 @@ actor SarvamProvider: TranscriptionProvider {
         eventsContinuation.finish()
     }
 
+    /// Restarts the supervisor (connect → drain → receive → reconnect)
+    /// without touching the audio-producer task. The producer keeps
+    /// reading the upstream `AsyncStream<PCMChunk>` and pushing into
+    /// the ring buffer across the dead window, so audio captured while
+    /// the previous supervisor was failing remains available — the new
+    /// supervisor's first connect drains the ring before live audio
+    /// resumes.
+    ///
+    /// This sidesteps two bugs the original "tear down + recreate
+    /// SarvamProvider" approach hit:
+    ///   1. AsyncStream's de-facto single-consumer behaviour: a fresh
+    ///      provider's producer reading from the SAME upstream stream
+    ///      after the previous provider's iterator dropped didn't
+    ///      reliably receive new chunks.
+    ///   2. URLSessionWebSocketTask upgrade race on first send/receive
+    ///      after `task.resume()` — the supervisor's retry loop already
+    ///      handles transient `ENOTCONN` on subsequent attempts, but
+    ///      starting from a fresh supervisor with no in-flight retry
+    ///      state could surface the race more visibly to the user.
+    func retry() async {
+        sarvamLogger.info("retrying (restarting supervisor only; producer + audio stream untouched)")
+        supervisorTask?.cancel()
+        supervisorTask = Task { [weak self] in
+            await self?.runSupervisor()
+        }
+    }
+
     // MARK: - Producer (audio in)
 
     /// Reads upstream `PCMChunk`s and pushes them into the ring buffer
