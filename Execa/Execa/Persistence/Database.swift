@@ -16,6 +16,12 @@ final nonisolated class Database: @unchecked Sendable {
         )
         var config = Configuration()
         config.label = "execa.main"
+        // GRDB enables `PRAGMA foreign_keys=ON` by default — verified in
+        // GRDB's source. The Phase 3 v3 migration relies on cascade
+        // deletes from `speakers` to `transcript_segments` when the
+        // diarization swap drops old speaker rows; that only fires when
+        // foreign keys are on. A migration test (`Phase3SchemaTests`)
+        // verifies the cascade actually runs on a fresh-built DB.
         let queue = try DatabaseQueue(path: resolved.path, configuration: config)
         try Database.migrator.migrate(queue)
         return Database(queue: queue)
@@ -131,6 +137,33 @@ final nonisolated class Database: @unchecked Sendable {
                     INSERT INTO transcript_fts(transcript_fts, rowid, text) VALUES ('delete', old.id, old.text);
                     INSERT INTO transcript_fts(rowid, text) VALUES (new.id, new.text);
                 END;
+            """)
+        }
+        // Phase 3 schema: speaker management + diarization status.
+        //   - `speakers.merged_into_speaker_id`: cross-source-capable alias
+        //     FK for the merge UX (DECISIONS.md 2026-05-08 Phase 3 entry).
+        //     ON DELETE SET NULL — if the merge target is deleted (rare,
+        //     happens during the post-batch swap), aliases pointing at it
+        //     just lose their alias instead of cascading to deletion.
+        //   - `meetings.diarization_status`: NULL = `.notRequested`,
+        //     `'pending'` = batch in flight, `'ok'` = swap complete,
+        //     `'failed'` = batch failed (`diarization_error` carries the
+        //     message).
+        //   - `meetings.diarization_attempted_at`: unix ms of the most
+        //     recent run (for "last attempted X ago" UI in Phase 5).
+        migrator.registerMigration("v3_speaker_management_and_diarization") { db in
+            try db.execute(sql: """
+                ALTER TABLE speakers ADD COLUMN merged_into_speaker_id INTEGER
+                    REFERENCES speakers(id) ON DELETE SET NULL;
+            """)
+            try db.execute(sql: """
+                ALTER TABLE meetings ADD COLUMN diarization_status TEXT;
+            """)
+            try db.execute(sql: """
+                ALTER TABLE meetings ADD COLUMN diarization_attempted_at INTEGER;
+            """)
+            try db.execute(sql: """
+                ALTER TABLE meetings ADD COLUMN diarization_error TEXT;
             """)
         }
         return migrator

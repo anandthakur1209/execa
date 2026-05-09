@@ -85,18 +85,22 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 
 ## Phase 3 — Diarization labels and speaker management
 
-**Goal:** Anonymous Speaker IDs become rename-able. Merge / split for diarizer errors.
+**Goal:** Anonymous Speaker IDs become rename-able. Merge / split for diarizer errors. Sarvam batch diarization client + auto-trigger at `stopMeeting` + result reconciliation + speaker management UI (rename / merge / split) on top.
 
 **Scope:**
-- `Diarization/SpeakerLabelManager.swift` — rename, merge, split; updates apply retroactively to past turns and forward to future turns from the same cluster.
-- `UI/SpeakerSidebar.swift` — list of speakers with talk-time and 3-second voice-sample playback.
-- "You" auto-labeling on the mic stream (always tagged as local user).
-- DB writes go through the `speakers` table; the `(meeting_id, source, raw_speaker_id)` tuple is the stable key.
+- `Diarization/SarvamBatchClient.swift` — batch STT upload with `with_diarization=true`.
+- `Diarization/DiarizationService.swift` — auto-trigger at `stopMeeting`, parallel per-stream batch calls, swap-in-DB transaction, status published via `DiarizationStatusStore`.
+- `Diarization/SpeakerLabelManager.swift` — rename, merge (cross-source), split; updates apply retroactively to past turns via the `display_label` join (no segment-row updates).
+- `UI/SpeakerSidebar.swift` — list of speakers with live talk-time and 3-second voice-sample playback (post-meeting only). Sidebar single-click rename is the canonical surface.
+- `UI/MeetingDetailView.swift` — minimal post-meeting host: speaker list, transcript with single-turn split, "Re-run diarization" button (with confirmation), single-button "Got it" announcement when batch lands. Phase 5 expands for History.
+- "You" auto-labeling on the mic stream — already wired in Phase 2 via `TranscriptStore.defaultLabel`; preserved across batch swap for `(mic, raw_speaker_id=0)` rename per DECISIONS.md (Phase 3 mic-rename-preservation entry).
+- DB writes go through the `speakers` table; the `(meeting_id, source, raw_speaker_id)` tuple is the stable key. v3 migration adds `merged_into_speaker_id` (cross-source-capable alias FK) and three `meetings.diarization_*` columns.
 
 **Acceptance:**
 - Rename a speaker mid-meeting → all past and future turns reflect the rename.
-- Merge two speakers → both clusters point to the same `display_label`.
+- Merge two speakers (including cross-source) → both clusters point to the same effective `display_label`; talk-time aggregates correctly.
 - Split → introduces a new `speakers` row and reassigns selected segments.
+- Back-to-back meetings each diarize independently (the "do it twice" gate from Phase 2's lessons-learned).
 
 ---
 
