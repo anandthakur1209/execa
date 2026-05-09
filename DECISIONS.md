@@ -190,6 +190,47 @@ The full reasoning lives in `meeting-app-spec.md`; this file is the index so Cla
   - **Phase 5+** (when the meeting detail view UI ships): the rename UI gets its proper home; the calendar-attendee seeding may attach if calendar integration lands.
 - **Status:** Active.
 
+## 2026-05-09 — Phase 3 commit 2: Sarvam batch STT API contract (discovered via probe)
+
+- **Decision:** The Sarvam batch Speech-to-Text contract for diarized transcription is locked to what `scripts/sarvam-batch-probe.swift` exercised end-to-end against the live API on 2026-05-09. The lifecycle is six steps; capturing here so commit 3's `SarvamBatchClient` doesn't re-discover.
+- **Endpoints (all under `https://api.sarvam.ai`):**
+  - `POST /speech-to-text/job/v1` — init. Body: `{"job_parameters": {"model": "saarika:v2.5", "language_code": "en-IN", "with_diarization": true, "input_audio_codec": "wav"}}`. Response 202: `{"job_id": "<id>", "storage_container_type": "Azure_V1", "job_state": "Accepted", ...}`. **Note:** the legacy `/speech-to-text/job/init` alias accepts a flat body (no `job_parameters` wrapper) and silently drops job params — the resulting job stays at `total_files=0` forever. The probe's first pass hit this trap; do **not** use `/init`.
+  - `POST /speech-to-text/job/v1/upload-files` — request presigned PUT URLs. Body: `{"job_id": "<id>", "files": ["mic.wav", "system.wav"]}`. Response 200: `{"upload_urls": {"<filename>": {"file_url": "<presigned-PUT-url>"}}, ...}`. The presigned URLs are short-lived Azure Blob SAS URLs (note: `Azure_V1` container type uses per-file blob URLs, not the directory SAS the legacy `/init` returns).
+  - `PUT <presigned-PUT-url>` — upload the WAV directly to Azure Blob with `x-ms-blob-type: BlockBlob` header and `Content-Type: audio/wav`. Response 201.
+  - `POST /speech-to-text/job/v1/{job_id}/start` — empty JSON body `{}`. Response 200: `{"job_state": "Pending", "total_files": <N>, ...}`.
+  - `GET /speech-to-text/job/v1/{job_id}/status` — poll. Response 200 with `job_state` of `Accepted` / `Pending` / `Completed` / `Failed`. Diarized 3-second sample completed in ~2 s after `/start` in the probe; longer files will scale linearly. Recommended poll interval ~3 s. Status payload includes `job_details[].outputs[].file_name` (e.g. `"0.json"` for the first input file) — these are the result-file names to download.
+  - `POST /speech-to-text/job/v1/download-files` — request presigned GET URLs for results. Body: `{"job_id": "<id>", "files": ["0.json"]}`. Response 200: `{"download_urls": {"0.json": {"file_url": "<presigned-GET-url>"}}, ...}`.
+  - `GET <presigned-GET-url>` — fetch the actual transcript JSON.
+- **Result JSON shape** (per file, captured in `Execa/ExecaTests/Fixtures/sarvam-batch-result-sample.json`):
+  ```json
+  {
+    "request_id": "<id>",
+    "transcript": "<full-text>",
+    "timestamps": null,
+    "diarized_transcript": {
+      "entries": [
+        {"transcript": "...", "start_time_seconds": 0.01, "end_time_seconds": 3.29, "speaker_id": "0"}
+      ]
+    },
+    "language_code": "en-IN",
+    "language_probability": null
+  }
+  ```
+  Key surprises vs. the spec's prior assumption:
+  - **`speaker_id` is a string** (`"0"`), not an integer. The parser converts to `Int` at the boundary; non-numeric IDs would fail loudly rather than silently misattribute.
+  - **Times are floating-point seconds** (`start_time_seconds`, `end_time_seconds`), not integer milliseconds. The parser multiplies by 1000 and rounds to match the existing `transcript_segments.start_ms / end_ms` schema.
+  - **No `language_code` per entry** — only at the top level. `BatchSegment.languageCode` therefore copies the top-level value into each segment in the parsed result.
+  - The flat `transcript` field at the top level is the un-diarized concatenation; `diarized_transcript.entries[]` is what the swap logic uses.
+- **Auth:** `api-subscription-key: <key>` header on every Sarvam endpoint (not the presigned Azure URLs — those carry their own SAS signature in the query string). Same key as the streaming client.
+- **Status:** Active.
+
+## 2026-05-09 — Phase 3: per-stream batch submission (mic.wav + system.wav as two calls)
+
+- **Decision:** `DiarizationService.runForMeeting` submits `mic.wav` and `system.wav` to the Sarvam batch endpoint as two **separate** jobs (concurrently, two calls), not as a single job containing both files, and not against the downmixed `master.flac`. Each per-stream result feeds into the DB with `source` already known per file.
+- **Alternatives considered:** (a) Submit `master.flac` once and let Sarvam diarize the mixed audio. (b) Submit `mic.wav` + `system.wav` together in one job with two input files. (c) Submit per-stream as two jobs.
+- **Why (c):** Submitting `master.flac` (option a) loses mic-vs-system attribution that the existing `(meeting_id, source, raw_speaker_id)` data model relies on — Sarvam would emit globally-numbered speaker IDs with no way to recover which physical input each ID came from. Submitting both files in one job (option b) works on the wire (the v1 API supports multiple files per job), but Sarvam's batch returns one independent diarization per file — speaker `"0"` in `mic.wav`'s result has no relationship to speaker `"0"` in `system.wav`'s result either way, so we'd still need to keep them separate in code. Two jobs (option c) is the simplest mental model: each call's `speakerID` namespace is implicitly per-source, the swap logic can iterate over `(source, BatchSegment)` pairs without coordination, and a partial failure (one source succeeds, the other fails) is straightforward to surface independently. Cost: two API calls per meeting instead of one. The cost is small relative to the typical 30+ second batch processing time.
+- **Status:** Active.
+
 ---
 
 ## How to add an entry

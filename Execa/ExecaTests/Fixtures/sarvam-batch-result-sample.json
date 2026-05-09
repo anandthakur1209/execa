@@ -1,0 +1,17 @@
+{
+  "diarized_transcript" : {
+    "entries" : [
+      {
+        "end_time_seconds" : 3.29,
+        "speaker_id" : "0",
+        "start_time_seconds" : 0.01,
+        "transcript" : "Hello. This is a phase two transcription test."
+      }
+    ]
+  },
+  "language_code" : "en-IN",
+  "language_probability" : null,
+  "request_id" : "20260509_fa59618c-1734-4208-a0bd-d20f095f1cb7",
+  "timestamps" : null,
+  "transcript" : "Hello. This is a phase two transcription test."
+}
