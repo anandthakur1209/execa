@@ -21,6 +21,24 @@ protocol TranscriptionProvider: Sendable {
     ) async throws
     func stop() async
     var events: AsyncStream<TranscriptionEvent> { get }
+    /// Whether `TranscriptToken.startMs` / `endMs` represent absolute
+    /// positions in the audio stream the provider received (`true`), or
+    /// the provider can't supply absolute timestamps and uses the
+    /// `endMs == segment-duration-in-ms` convention (`false`). Sarvam
+    /// streaming returns `false` (its wire format only carries
+    /// `metrics.audio_duration` per message); Deepgram in Phase 6 will
+    /// return `true`. `TranscriptStore.applyFinal` switches on this to
+    /// decide whether to trust the token's timestamps directly or fall
+    /// back to wall-clock-since-meeting-start.
+    var providesAbsoluteTimestamps: Bool { get }
+}
+
+extension TranscriptionProvider {
+    /// Default: most providers will support absolute timestamps. Only
+    /// providers that can't (Sarvam streaming, today) override to false.
+    var providesAbsoluteTimestamps: Bool {
+        true
+    }
 }
 
 /// Normalized event shape that TranscriptionService and TranscriptStore see,
@@ -52,6 +70,13 @@ enum TranscriptionEvent: Equatable {
 /// **relative to the start of the audio stream the provider received** — not
 /// relative to wall clock or to the meeting. TranscriptStore translates
 /// these into meeting-relative ms before insert.
+///
+/// **Convention when the source provider returns
+/// `providesAbsoluteTimestamps == false`** (Sarvam streaming today): the
+/// provider sets `startMs = 0` and stores the segment duration in ms in
+/// `endMs`. `TranscriptStore.applyFinal` reads the per-source flag and
+/// substitutes wall-clock-since-meeting-start when the flag is false, so
+/// downstream code never has to second-guess the field's meaning.
 struct TranscriptToken: Equatable {
     var startMs: Int
     var endMs: Int

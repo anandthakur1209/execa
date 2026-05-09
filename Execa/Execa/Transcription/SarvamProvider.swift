@@ -24,6 +24,12 @@ actor SarvamProvider: TranscriptionProvider {
     nonisolated let events: AsyncStream<TranscriptionEvent>
     private nonisolated let eventsContinuation: AsyncStream<TranscriptionEvent>.Continuation
 
+    /// Sarvam streaming's wire format does not include per-utterance
+    /// absolute timestamps — only `metrics.audio_duration` per message.
+    /// `TranscriptStore.applyFinal` reads this flag and substitutes
+    /// wall-clock-since-meeting-start.
+    nonisolated let providesAbsoluteTimestamps: Bool = false
+
     private let apiKey: String
     private let languageCode: String
     private let model: String

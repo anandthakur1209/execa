@@ -11,6 +11,12 @@ import Foundation
 final class MockTranscriptionProvider: TranscriptionProvider, @unchecked Sendable {
     nonisolated let events: AsyncStream<TranscriptionEvent>
     private nonisolated let continuation: AsyncStream<TranscriptionEvent>.Continuation
+    /// Per-instance override of the protocol's
+    /// `providesAbsoluteTimestamps` requirement. Defaults to `true` so
+    /// existing tests that build tokens with non-zero `startMs` keep
+    /// working unchanged. The Sarvam-fallback regression test passes
+    /// `false` to mimic Sarvam's wire-format constraint.
+    nonisolated let providesAbsoluteTimestamps: Bool
 
     private let lock = NSLock()
     private let scripted: [TranscriptionEvent]
@@ -19,9 +25,14 @@ final class MockTranscriptionProvider: TranscriptionProvider, @unchecked Sendabl
     private var drainTask: Task<Void, Never>?
     private var chunkCount = 0
 
-    init(events: [TranscriptionEvent], interEventDelayMs: UInt64 = 0) {
+    init(
+        events: [TranscriptionEvent],
+        interEventDelayMs: UInt64 = 0,
+        providesAbsoluteTimestamps: Bool = true
+    ) {
         scripted = events
         interEventDelayNs = interEventDelayMs * 1_000_000
+        self.providesAbsoluteTimestamps = providesAbsoluteTimestamps
 
         var capturedCont: AsyncStream<TranscriptionEvent>.Continuation?
         let stream = AsyncStream<TranscriptionEvent> { cont in capturedCont = cont }

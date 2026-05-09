@@ -29,6 +29,11 @@ final class TranscriptStore {
     ]
 
     private let database: Database
+    /// Clock used to compute wall-clock-since-meeting-start when a
+    /// streaming provider can't supply absolute timestamps (Sarvam).
+    /// Injected so tests can pass a fixed-value closure for
+    /// deterministic assertions; production uses `Date.init`.
+    private let clock: () -> Date
     private var meetingID: String = ""
     private var meetingStartedAt: Date = .init()
     private var displayName: String?
@@ -43,8 +48,9 @@ final class TranscriptStore {
         case stopped
     }
 
-    nonisolated init(database: Database) {
+    nonisolated init(database: Database, clock: @escaping () -> Date = Date.init) {
         self.database = database
+        self.clock = clock
     }
 
     /// Called by AppCoordinator when the meeting transitions to
@@ -64,12 +70,27 @@ final class TranscriptStore {
     /// Provider-side entry point. Nonisolated → callers don't need to
     /// hop to MainActor explicitly. DB I/O happens off-main inside the
     /// per-event handlers; state mutation runs on MainActor.
-    nonisolated func ingest(_ event: TranscriptionEvent, source: PCMChunk.Source) async {
+    ///
+    /// `providesAbsoluteTimestamps` reflects the source provider's
+    /// `TranscriptionProvider.providesAbsoluteTimestamps` requirement.
+    /// The default `true` keeps existing direct-driven tests working
+    /// without changes; `TranscriptionService` reads each provider's
+    /// flag at bridge-start and passes it through here so
+    /// `applyFinal` can pick the right timestamp arithmetic per source.
+    nonisolated func ingest(
+        _ event: TranscriptionEvent,
+        source: PCMChunk.Source,
+        providesAbsoluteTimestamps: Bool = true
+    ) async {
         switch event {
         case let .interim(token):
             await applyInterim(token: token, source: source)
         case let .final(token):
-            await applyFinal(token: token, source: source)
+            await applyFinal(
+                token: token,
+                source: source,
+                providesAbsoluteTimestamps: providesAbsoluteTimestamps
+            )
         case .connected:
             await setConnection(.connected, for: source)
         case .disconnected:
@@ -133,18 +154,62 @@ final class TranscriptStore {
         }
     }
 
-    private func applyFinal(token: TranscriptToken, source: PCMChunk.Source) async {
+    /// Commits a finalized event to in-memory `lines` + the DB
+    /// `transcript_segments` table.
+    ///
+    /// Timestamp arithmetic depends on the source provider's
+    /// `providesAbsoluteTimestamps` flag (see
+    /// `TranscriptionProvider`):
+    /// - `true`: trust `token.startMs` / `token.endMs` directly (they
+    ///   are absolute positions in the audio stream the provider saw,
+    ///   which here also equals the meeting start since execa sends
+    ///   audio from start-of-meeting onward).
+    /// - `false`: the provider couldn't supply absolute timestamps and
+    ///   put the segment duration in `token.endMs`. Use the injected
+    ///   clock's wall-clock-since-meeting-start as the segment end;
+    ///   subtract the duration for the start.
+    private func applyFinal(
+        token: TranscriptToken,
+        source: PCMChunk.Source,
+        providesAbsoluteTimestamps: Bool
+    ) async {
         guard let speakerID = await ensureSpeakerRow(source: source, rawSpeakerID: token.speakerID) else {
             return
         }
         let label = await fetchLabel(forSpeakerID: speakerID)
-        let timestamp = relativeSeconds(token.startMs)
         let key = SpeakerKey(source: source, rawID: token.speakerID)
+
+        let computedStart: TimeInterval
+        let computedEnd: TimeInterval
+        if providesAbsoluteTimestamps {
+            computedStart = TimeInterval(max(0, token.startMs)) / 1000
+            computedEnd = TimeInterval(max(0, token.endMs)) / 1000
+        } else {
+            // Streaming-provider wall-clock fallback. token.endMs
+            // carries the segment duration in ms (Sarvam's wire
+            // format). Use elapsed since meeting start as the
+            // segment's end position; subtract duration for the start.
+            //
+            // INTENTIONAL CLAMP: max(0, ...) below truncates segment
+            // duration for utterances that finalize very close to
+            // meeting start (elapsed < duration — happens if the
+            // provider emits a final mid-first-utterance, before
+            // meetingStartedAt + duration_ms wall-clock). We accept
+            // the truncation rather than reporting negative start_ms;
+            // it's at most a couple-second cosmetic distortion on the
+            // very first line and only when the user starts speaking
+            // before the socket connects. NOT a bug — leave the
+            // clamp as-is.
+            let durationSeconds = TimeInterval(max(0, token.endMs)) / 1000
+            computedEnd = max(0, clock().timeIntervalSince(meetingStartedAt))
+            computedStart = max(0, computedEnd - durationSeconds)
+        }
+        let timestamp = computedStart
 
         await persistFinalSegment(
             speakerID: speakerID,
-            startMs: clippedToMeetingStart(token.startMs),
-            endMs: clippedToMeetingStart(token.endMs),
+            startMs: Int(computedStart * 1000),
+            endMs: Int(computedEnd * 1000),
             text: token.text,
             confidence: token.confidence
         )
@@ -293,15 +358,14 @@ final class TranscriptStore {
         }
     }
 
-    /// Sarvam returns timestamps relative to the start of the audio stream
-    /// it received — which is also the meeting start, so on the happy path
-    /// these are equivalent. We still floor at 0 to defend against
-    /// negative-clipping if a provider ever sends a pre-stream-start
-    /// reference.
-    private func clippedToMeetingStart(_ providerMs: Int) -> Int {
-        max(0, providerMs)
-    }
-
+    /// Helper used by `applyInterim` only. Floors at zero defensively;
+    /// Sarvam streaming doesn't emit interim events today (per the
+    /// commit 5 probe) so the call is unreachable in production.
+    /// Phase 6's Deepgram path will exercise it; if Deepgram emits
+    /// absolute timestamps for interims (it does), this conversion is
+    /// correct. If a future provider returns the
+    /// `endMs == duration` convention for interims too, this helper
+    /// will need the same flag-aware split as `applyFinal`.
     private func relativeSeconds(_ providerMs: Int) -> TimeInterval {
         TimeInterval(max(0, providerMs)) / 1000
     }

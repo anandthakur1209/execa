@@ -80,18 +80,24 @@ actor TranscriptionService {
 
         // Bridge tasks: drain each provider's events into the store. The
         // AsyncStream is closed when the provider's stop() finishes the
-        // continuation, at which point the for-await exits.
+        // continuation, at which point the for-await exits. Capture each
+        // provider's `providesAbsoluteTimestamps` flag once at bridge
+        // start and pass it through to `store.ingest` so TranscriptStore
+        // knows whether to use the token's startMs/endMs directly or
+        // fall back to wall-clock-since-meeting-start.
         let storeRef = store
         let micEvents = mic.events
         let systemEvents = system.events
+        let micProvidesAbsolute = mic.providesAbsoluteTimestamps
+        let systemProvidesAbsolute = system.providesAbsoluteTimestamps
         let micBridge = Task {
             for await event in micEvents {
-                await storeRef.ingest(event, source: .mic)
+                await storeRef.ingest(event, source: .mic, providesAbsoluteTimestamps: micProvidesAbsolute)
             }
         }
         let systemBridge = Task {
             for await event in systemEvents {
-                await storeRef.ingest(event, source: .system)
+                await storeRef.ingest(event, source: .system, providesAbsoluteTimestamps: systemProvidesAbsolute)
             }
         }
 
