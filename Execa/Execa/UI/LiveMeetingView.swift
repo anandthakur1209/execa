@@ -224,7 +224,7 @@ struct LiveMeetingView: View {
         }
         .transcriptTurnContextMenu(segmentID: line.databaseSegmentID) { segmentID, label in
             Task {
-                _ = try? await coordinator.speakerLabelManager.split(
+                _ = try? await coordinator.splitSegment(
                     segmentID: segmentID,
                     intoNewLabel: label
                 )

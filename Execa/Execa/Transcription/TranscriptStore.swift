@@ -1,24 +1,12 @@
 import Foundation
 import GRDB
 
-/// Live + persisted transcript state for one meeting.
-///
-/// Designed as `@MainActor @Observable` so SwiftUI can read `lines`
-/// synchronously on the main thread (no actor-snapshot bridge). The
-/// `ingest(_:source:)` entry point is `nonisolated async` — provider
-/// tasks call it from arbitrary contexts; inside, DB I/O runs off-main
-/// (GRDB's queue) and only state mutation hops back to MainActor.
-///
-/// State held:
-/// - `lines`: append-mostly array of `TranscriptLine`s for the UI.
-/// - `connection`: current connection state per source, drives the
-///   "Connected" / "Reconnecting…" / "Transcription stopped" pill.
-/// - In-memory interim map: `(source, raw_speaker_id)` → in-progress
-///   line UUID. New interim text replaces the existing line; final
-///   commits to DB and flips the line to `isFinal=true`.
-/// - `speakerRowIDs`: cache of `(source, raw_speaker_id)` → DB id from
-///   the `speakers` table. Populated lazily on first event for each
-///   speaker; idempotent across restarts inside a meeting.
+/// Live + persisted transcript state for one meeting. `@MainActor
+/// @Observable` so SwiftUI reads `lines` synchronously; `ingest` is
+/// `nonisolated async` so providers call it from any context (DB I/O
+/// off-main, state mutation MainActor). Holds `lines`, `connection`,
+/// the in-memory interim map keyed by `(source, raw_speaker_id)`, and
+/// the `speakerRowIDs` lazy cache.
 @MainActor
 @Observable
 final class TranscriptStore {
@@ -147,6 +135,7 @@ final class TranscriptStore {
             lines[index].text = token.text
             lines[index].timestamp = timestamp
             lines[index].speakerLabel = label
+            lines[index].databaseSpeakerID = speakerID
         } else {
             let lineID = UUID()
             interimLineIDs[key] = lineID
@@ -156,7 +145,9 @@ final class TranscriptStore {
                 text: token.text,
                 isFinal: false,
                 timestamp: timestamp,
-                source: source
+                source: source,
+                databaseSegmentID: nil,
+                databaseSpeakerID: speakerID
             ))
         }
     }
@@ -230,6 +221,7 @@ final class TranscriptStore {
             lines[index].timestamp = timestamp
             lines[index].speakerLabel = label
             lines[index].databaseSegmentID = dbSegmentID
+            lines[index].databaseSpeakerID = speakerID
             return
         }
         lines.append(TranscriptLine(
@@ -239,7 +231,8 @@ final class TranscriptStore {
             isFinal: true,
             timestamp: timestamp,
             source: source,
-            databaseSegmentID: dbSegmentID
+            databaseSegmentID: dbSegmentID,
+            databaseSpeakerID: speakerID
         ))
     }
 
@@ -370,4 +363,34 @@ struct SpeakerKey: Hashable {
 
 enum TranscriptStoreError: Error {
     case speakerInsertFailed
+}
+
+// MARK: - Label propagation (BUG 7)
+
+//
+// Lifted to a same-file extension so the methods don't count toward
+// the type-body-length cap. Without these, past transcript turns
+// kept their stale captured `speakerLabel` until the next `.final`
+// event arrived. Called by `AppCoordinator`'s rename/merge/split
+// wrappers after the DB write succeeds.
+
+extension TranscriptStore {
+    func applyRename(speakerID: Int64, newLabel: String) {
+        for index in lines.indices where lines[index].databaseSpeakerID == speakerID {
+            lines[index].speakerLabel = newLabel
+        }
+    }
+
+    func applyMerge(sourceSpeakerID: Int64, targetLabel: String) {
+        for index in lines.indices where lines[index].databaseSpeakerID == sourceSpeakerID {
+            lines[index].speakerLabel = targetLabel
+        }
+    }
+
+    func applySplit(segmentID: Int64, newSpeakerID: Int64, newLabel: String) {
+        for index in lines.indices where lines[index].databaseSegmentID == segmentID {
+            lines[index].databaseSpeakerID = newSpeakerID
+            lines[index].speakerLabel = newLabel
+        }
+    }
 }

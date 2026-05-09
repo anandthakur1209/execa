@@ -135,7 +135,7 @@ struct MeetingDetailView: View {
                         mergeTargets: rows,
                         onRename: { speakerID, newLabel in
                             Task {
-                                try? await coordinator.speakerLabelManager.rename(
+                                try? await coordinator.renameSpeaker(
                                     speakerID: speakerID, to: newLabel
                                 )
                                 await refreshAll()
@@ -143,7 +143,7 @@ struct MeetingDetailView: View {
                         },
                         onMerge: { sourceID, targetID in
                             Task {
-                                try? await coordinator.speakerLabelManager.merge(
+                                try? await coordinator.mergeSpeakers(
                                     sourceSpeakerID: sourceID,
                                     intoTargetSpeakerID: targetID
                                 )
@@ -174,7 +174,7 @@ struct MeetingDetailView: View {
 
     private func handleSplit(segmentID: Int64, label: String) {
         Task {
-            _ = try? await coordinator.speakerLabelManager.split(
+            _ = try? await coordinator.splitSegment(
                 segmentID: segmentID,
                 intoNewLabel: label
             )

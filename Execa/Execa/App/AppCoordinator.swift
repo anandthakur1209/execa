@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 actor AppCoordinator {
     /// Factory the coordinator uses to create per-source transcription
@@ -172,6 +173,59 @@ actor AppCoordinator {
                 systemWAV: systemWAV
             )
         }
+    }
+
+    /// Renames a single speaker AND propagates the new label to any
+    /// live `TranscriptStore.lines` already attributed to it. Without
+    /// the propagation, past transcript turns kept their stale
+    /// captured `speakerLabel` (BUG 7). UI call sites should use this
+    /// wrapper instead of `speakerLabelManager.rename` directly.
+    func renameSpeaker(speakerID: Int64, to newLabel: String) async throws {
+        try await speakerLabelManager.rename(speakerID: speakerID, to: newLabel)
+        let trimmed = newLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let store = transcriptStore
+        await MainActor.run { store.applyRename(speakerID: speakerID, newLabel: trimmed) }
+    }
+
+    /// Merges two speakers AND propagates the merge target's label
+    /// onto any live transcript turns attributed to the source. The
+    /// segments themselves stay attached to the source row (merge is
+    /// a display-time alias, not a re-attribution); only `lines`'
+    /// `speakerLabel` is rewritten so the user sees the post-merge
+    /// label immediately. UI call sites should use this wrapper.
+    func mergeSpeakers(sourceSpeakerID: Int64, intoTargetSpeakerID targetSpeakerID: Int64) async throws {
+        try await speakerLabelManager.merge(
+            sourceSpeakerID: sourceSpeakerID,
+            intoTargetSpeakerID: targetSpeakerID
+        )
+        let targetLabel = await fetchSpeakerLabel(speakerID: targetSpeakerID)
+        let store = transcriptStore
+        await MainActor.run {
+            store.applyMerge(sourceSpeakerID: sourceSpeakerID, targetLabel: targetLabel)
+        }
+    }
+
+    /// Splits the segment off into a new speaker AND retargets the
+    /// matching live `TranscriptLine` (by `databaseSegmentID`) at the
+    /// new speakers row. UI call sites should use this wrapper.
+    @discardableResult
+    func splitSegment(segmentID: Int64, intoNewLabel newLabel: String) async throws -> Int64 {
+        let newSpeakerID = try await speakerLabelManager.split(
+            segmentID: segmentID,
+            intoNewLabel: newLabel
+        )
+        let trimmed = newLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let store = transcriptStore
+        await MainActor.run {
+            store.applySplit(segmentID: segmentID, newSpeakerID: newSpeakerID, newLabel: trimmed)
+        }
+        return newSpeakerID
+    }
+
+    private func fetchSpeakerLabel(speakerID: Int64) async -> String {
+        await (try? database.queue.read { db in
+            try SpeakerQueries.displayLabel(speakerID: speakerID, in: db)
+        }) ?? nil ?? ""
     }
 
     /// Re-run diarization on demand (Phase 3 commit 7's

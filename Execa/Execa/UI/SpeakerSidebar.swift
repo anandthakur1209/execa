@@ -53,14 +53,16 @@ struct SpeakerSidebar: View {
                             isLive: true,
                             mergeTargets: rows,
                             onRename: { speakerID, newLabel in
-                                Task { try? await coordinator.speakerLabelManager.rename(
-                                    speakerID: speakerID,
-                                    to: newLabel
-                                ) }
+                                Task {
+                                    try? await coordinator.renameSpeaker(
+                                        speakerID: speakerID,
+                                        to: newLabel
+                                    )
+                                }
                             },
                             onMerge: { sourceID, targetID in
                                 Task {
-                                    try? await coordinator.speakerLabelManager.merge(
+                                    try? await coordinator.mergeSpeakers(
                                         sourceSpeakerID: sourceID,
                                         intoTargetSpeakerID: targetID
                                     )

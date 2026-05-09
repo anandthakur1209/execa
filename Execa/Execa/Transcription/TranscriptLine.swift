@@ -24,4 +24,11 @@ struct TranscriptLine: Equatable, Identifiable {
     /// Used by Phase 3 commit 8's split context menu — split needs a
     /// segment row ID to point at.
     var databaseSegmentID: Int64?
+    /// `speakers.id` of the row this line is attributed to. Set on
+    /// every applyInterim/applyFinal so the BUG 7 label-propagation
+    /// pass can update `speakerLabel` in-place when the user renames
+    /// or merges this speaker. Always set in production (we resolve
+    /// the speakers row before pushing to `lines`); optional only for
+    /// defensive testing of pre-resolution code paths.
+    var databaseSpeakerID: Int64?
 }
