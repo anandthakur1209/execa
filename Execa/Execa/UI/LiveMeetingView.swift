@@ -222,6 +222,14 @@ struct LiveMeetingView: View {
             }
             Spacer(minLength: 0)
         }
+        .transcriptTurnContextMenu(segmentID: line.databaseSegmentID) { segmentID, label in
+            Task {
+                _ = try? await coordinator.speakerLabelManager.split(
+                    segmentID: segmentID,
+                    intoNewLabel: label
+                )
+            }
+        }
     }
 
     private func formatTimestamp(_ seconds: TimeInterval) -> String {

@@ -165,21 +165,20 @@ struct MeetingDetailView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
                 ForEach(transcriptLines) { line in
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(line.timestamp)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 56, alignment: .leading)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(line.speakerLabel).font(.caption.bold())
-                                .foregroundStyle(.secondary)
-                            Text(line.text)
-                        }
-                        Spacer(minLength: 0)
-                    }
+                    MeetingDetailTranscriptRow(line: line, onSplit: handleSplit)
                 }
             }
             .padding(16)
+        }
+    }
+
+    private func handleSplit(segmentID: Int64, label: String) {
+        Task {
+            _ = try? await coordinator.speakerLabelManager.split(
+                segmentID: segmentID,
+                intoNewLabel: label
+            )
+            await refreshAll()
         }
     }
 
@@ -296,4 +295,25 @@ struct TranscriptDisplayLine: Identifiable, Equatable {
     let timestamp: String
     let speakerLabel: String
     let text: String
+}
+
+private struct MeetingDetailTranscriptRow: View {
+    let line: TranscriptDisplayLine
+    let onSplit: (Int64, String) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(line.timestamp)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 56, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(line.speakerLabel).font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                Text(line.text)
+            }
+            Spacer(minLength: 0)
+        }
+        .transcriptTurnContextMenu(segmentID: line.id, onSplit: onSplit)
+    }
 }

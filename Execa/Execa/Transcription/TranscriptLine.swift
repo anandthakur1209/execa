@@ -19,4 +19,9 @@ struct TranscriptLine: Equatable, Identifiable {
     /// Distinguishes mic vs system in case the UI ever wants to colour-code
     /// or filter; Phase 2 doesn't, but the field is cheap.
     var source: PCMChunk.Source
+    /// `transcript_segments.id` once the line has been persisted as a
+    /// final. `nil` for interim lines (which haven't hit the DB yet).
+    /// Used by Phase 3 commit 8's split context menu — split needs a
+    /// segment row ID to point at.
+    var databaseSegmentID: Int64?
 }

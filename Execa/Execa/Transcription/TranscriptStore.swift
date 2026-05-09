@@ -28,12 +28,10 @@ final class TranscriptStore {
         .system: .disconnected
     ]
 
-    /// Live talk-time per `speakers.id` row, in seconds. Sum of
-    /// `(endMs - startMs) / 1000` across `.final` ingests. The
-    /// `SpeakerSidebar` reads this; post-meeting `MeetingDetailView`
-    /// uses the SQL equivalent (`SpeakerQueries.talkTimeAggregated`).
-    /// Keyed by raw `speakers.id` because merges (a post-batch
-    /// affordance) haven't happened yet at live time.
+    /// Live talk-time per `speakers.id` row, in seconds. SpeakerSidebar
+    /// reads this; post-meeting MeetingDetailView uses the SQL
+    /// equivalent in `SpeakerQueries.talkTimeAggregated`. Keyed by raw
+    /// `speakers.id` (merges happen post-batch only).
     private(set) var talkTimeBySpeaker: [Int64: TimeInterval] = [:]
 
     private let database: Database
@@ -215,7 +213,7 @@ final class TranscriptStore {
         }
         let timestamp = computedStart
 
-        await persistFinalSegment(
+        let dbSegmentID = await persistFinalSegment(
             speakerID: speakerID,
             startMs: Int(computedStart * 1000),
             endMs: Int(computedEnd * 1000),
@@ -223,7 +221,6 @@ final class TranscriptStore {
             confidence: token.confidence
         )
 
-        // Live talk-time tally for the SpeakerSidebar.
         talkTimeBySpeaker[speakerID, default: 0] += max(0, computedEnd - computedStart)
 
         if let interimID = interimLineIDs.removeValue(forKey: key),
@@ -232,16 +229,18 @@ final class TranscriptStore {
             lines[index].isFinal = true
             lines[index].timestamp = timestamp
             lines[index].speakerLabel = label
-        } else {
-            lines.append(TranscriptLine(
-                id: UUID(),
-                speakerLabel: label,
-                text: token.text,
-                isFinal: true,
-                timestamp: timestamp,
-                source: source
-            ))
+            lines[index].databaseSegmentID = dbSegmentID
+            return
         }
+        lines.append(TranscriptLine(
+            id: UUID(),
+            speakerLabel: label,
+            text: token.text,
+            isFinal: true,
+            timestamp: timestamp,
+            source: source,
+            databaseSegmentID: dbSegmentID
+        ))
     }
 
     private func setConnection(_ state: ConnectionState, for source: PCMChunk.Source) {
@@ -316,16 +315,17 @@ final class TranscriptStore {
         }
     }
 
+    @discardableResult
     private func persistFinalSegment(
         speakerID: Int64,
         startMs: Int,
         endMs: Int,
         text: String,
         confidence: Double?
-    ) async {
+    ) async -> Int64? {
         let mid = meetingID
         do {
-            try await database.queue.write { db in
+            return try await database.queue.write { db -> Int64 in
                 try db.execute(
                     sql: """
                     INSERT INTO transcript_segments
@@ -334,52 +334,29 @@ final class TranscriptStore {
                     """,
                     arguments: [mid, speakerID, startMs, endMs, text, confidence]
                 )
+                return db.lastInsertedRowID
             }
         } catch {
             // Failures are logged-but-not-fatal in Phase 2; if the user
             // asks "where's my transcript", the in-memory `lines` still
             // has it for the current session. Phase 5's recovery path
             // is the right place to harden this.
+            return nil
         }
     }
 
     // MARK: - Pure helpers
 
-    /// Phase 2 (Path B) label policy. Sarvam streaming STT does not support
-    /// diarization, so live events always arrive with `raw_speaker_id == 0`
-    /// — both streams collapse to a single label. Multi-speaker labels are
-    /// produced post-hoc via Sarvam's batch API in Phase 3+.
-    ///
-    /// Defensive defaults are kept for `raw_speaker_id != 0` so the code
-    /// behaves sanely if (a) we run under a provider that does diarize live
-    /// (Deepgram, Phase 6) or (b) Phase 3's batch-backfill writes through
-    /// this same code path. The `(mic, N≥1)` and `(system, N≥1)` labels
-    /// here are placeholders that the Phase 3 rename UI overwrites.
     private func defaultLabel(source: PCMChunk.Source, rawSpeakerID: Int) -> String {
-        switch source {
-        case .mic:
-            if rawSpeakerID == 0 {
-                return displayName ?? "You"
-            }
-            return "In-room \(rawSpeakerID + 1)"
-        case .system:
-            if rawSpeakerID == 0 {
-                return "Remote"
-            }
-            return "Speaker \(rawSpeakerID + 1)"
-        }
+        TranscriptDefaultLabel.label(
+            source: source,
+            rawSpeakerID: rawSpeakerID,
+            displayName: displayName
+        )
     }
 
-    /// Helper used by `applyInterim` only. Floors at zero defensively;
-    /// Sarvam streaming doesn't emit interim events today (per the
-    /// commit 5 probe) so the call is unreachable in production.
-    /// Phase 6's Deepgram path will exercise it; if Deepgram emits
-    /// absolute timestamps for interims (it does), this conversion is
-    /// correct. If a future provider returns the
-    /// `endMs == duration` convention for interims too, this helper
-    /// will need the same flag-aware split as `applyFinal`.
     private func relativeSeconds(_ providerMs: Int) -> TimeInterval {
-        TimeInterval(max(0, providerMs)) / 1000
+        TimeInterval.relativeSeconds(providerMs: providerMs)
     }
 }
 
