@@ -119,12 +119,22 @@ extension DiarizationService {
                 in: db
             )
 
-            // 4. Reapply the preserved mic-0 rename, if any.
-            if let preservedMicZeroLabel,
-               let micZeroID = speakerIDMap[SpeakerKey(source: "mic", rawSpeakerID: 0)] {
+            // 4. Reapply the preserved mic-0 rename, if any. UPDATE by
+            //    (meeting_id, source='mic', raw_speaker_id=0) rather
+            //    than via the speakerIDMap because the map is keyed
+            //    by the original Sarvam ID — and Decision 17 cares
+            //    about the post-renumbering `(mic, 0)` row regardless
+            //    of what Sarvam called it internally. BUG 8 turned the
+            //    map-keyed lookup into a silent no-op whenever Sarvam
+            //    returned a non-zero `speaker_id`; this predicate-based
+            //    UPDATE is robust.
+            if let preservedMicZeroLabel {
                 try db.execute(
-                    sql: "UPDATE speakers SET display_label = ? WHERE id = ?",
-                    arguments: [preservedMicZeroLabel, micZeroID]
+                    sql: """
+                    UPDATE speakers SET display_label = ?
+                    WHERE meeting_id = ? AND source = 'mic' AND raw_speaker_id = 0
+                    """,
+                    arguments: [preservedMicZeroLabel, meetingID]
                 )
             }
 
@@ -165,6 +175,16 @@ extension DiarizationService {
         return label
     }
 
+    /// Per-source insert input bundle. Cuts the per-source helper's
+    /// parameter count below the lint cap and groups the values that
+    /// always travel together.
+    fileprivate struct SourceInsertInput {
+        let meetingID: String
+        let source: String
+        let segments: [SarvamBatchResult.BatchSegment]
+        let displayName: String
+    }
+
     fileprivate static func insertSpeakers(
         meetingID: String,
         results: (mic: SarvamBatchResult, system: SarvamBatchResult),
@@ -172,30 +192,88 @@ extension DiarizationService {
         map: inout [SpeakerKey: Int64],
         in db: GRDB.Database
     ) throws {
-        let micIDs = Set(results.mic.segments.map(\.speakerID)).sorted()
-        let systemIDs = Set(results.system.segments.map(\.speakerID)).sorted()
-        for rawID in micIDs {
-            let label = micLabel(rawSpeakerID: rawID, displayName: displayName)
-            let speakerRowID = try insertSpeakerRow(
+        try insertOneSource(
+            input: SourceInsertInput(
                 meetingID: meetingID,
                 source: "mic",
-                rawSpeakerID: rawID,
-                label: label,
-                in: db
-            )
-            map[SpeakerKey(source: "mic", rawSpeakerID: rawID)] = speakerRowID
-        }
-        for rawID in systemIDs {
-            let label = systemLabel(rawSpeakerID: rawID)
-            let speakerRowID = try insertSpeakerRow(
+                segments: results.mic.segments,
+                displayName: displayName
+            ),
+            map: &map,
+            in: db
+        )
+        try insertOneSource(
+            input: SourceInsertInput(
                 meetingID: meetingID,
                 source: "system",
-                rawSpeakerID: rawID,
+                segments: results.system.segments,
+                displayName: displayName
+            ),
+            map: &map,
+            in: db
+        )
+    }
+
+    /// Renumbers the Sarvam-returned `speaker_id`s for one source to a
+    /// 0-indexed sequence sorted by earliest segment `start_ms`, then
+    /// inserts the `speakers` rows with those renumbered values.
+    /// Sarvam's batch API doesn't reliably return 0-indexed cluster
+    /// IDs (BUG 8 surfaced a single-speaker mic returning
+    /// `speaker_id=1`, leaving no `(mic, 0)` row and silently
+    /// breaking Decision 17). Renumbering keeps the DB invariant
+    /// "first speaker on this source has `raw_speaker_id=0`" so the
+    /// default-label and mic-rename-preservation logic stay correct.
+    /// `transcript_segments.speaker_id` rows are inserted later via
+    /// the same `map`, which is keyed by the original Sarvam ID, so
+    /// the segments resolve to the renumbered speakers row.
+    private static func insertOneSource(
+        input: SourceInsertInput,
+        map: inout [SpeakerKey: Int64],
+        in db: GRDB.Database
+    ) throws {
+        let segments = input.segments
+        let source = input.source
+        let displayName = input.displayName
+        let meetingID = input.meetingID
+        var firstSeen: [Int: Int] = [:] // sarvamID -> earliest startMs
+        for segment in segments {
+            let prev = firstSeen[segment.speakerID] ?? .max
+            firstSeen[segment.speakerID] = min(prev, segment.startMs)
+        }
+        // Sort by (firstSeen, sarvamID) for determinism on ties.
+        let ordered = firstSeen.sorted { lhs, rhs in
+            if lhs.value != rhs.value { return lhs.value < rhs.value }
+            return lhs.key < rhs.key
+        }
+        for (newRawID, entry) in ordered.enumerated() {
+            let sarvamID = entry.key
+            let label = labelFor(
+                source: source,
+                rawSpeakerID: newRawID,
+                displayName: displayName
+            )
+            let speakerRowID = try insertSpeakerRow(
+                meetingID: meetingID,
+                source: source,
+                rawSpeakerID: newRawID,
                 label: label,
                 in: db
             )
-            map[SpeakerKey(source: "system", rawSpeakerID: rawID)] = speakerRowID
+            // Map is keyed by the original Sarvam ID so segment
+            // inserts can still look up the row even though the
+            // stored raw_speaker_id is the renumbered value.
+            map[SpeakerKey(source: source, rawSpeakerID: sarvamID)] = speakerRowID
         }
+    }
+
+    private static func labelFor(
+        source: String,
+        rawSpeakerID: Int,
+        displayName: String
+    ) -> String {
+        source == "mic"
+            ? micLabel(rawSpeakerID: rawSpeakerID, displayName: displayName)
+            : systemLabel(rawSpeakerID: rawSpeakerID)
     }
 
     fileprivate static func insertSpeakerRow(
