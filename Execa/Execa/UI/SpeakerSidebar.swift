@@ -90,41 +90,25 @@ struct SpeakerSidebar: View {
         }
     }
 
-    /// Joins the live `speakers` rows (filtered to those that have
-    /// emitted at least one line) with `talkTimeBySpeaker`. Static so
-    /// it's testable without a SwiftUI host.
+    /// Joins the meeting's visible speakers with `talkTimeBySpeaker`.
+    /// "Visible" here means post-merge canonical AND not orphaned by
+    /// the Phase 3.5 dedup pass — `SpeakerQueries.visibleSpeakers`
+    /// owns the SQL so this view stays in lockstep with
+    /// `MeetingDetailView`. Static so it's testable without a SwiftUI
+    /// host.
     static func derive(
         meetingID: String,
         store: TranscriptStore,
         coordinator: AppCoordinator
     ) async throws -> [SpeakerRowModel] {
-        // The TranscriptStore-internal `speakerRowIDs` cache isn't
-        // exposed publicly; the DB is the source of truth. We pull
-        // every `speakers` row for the meeting that has at least one
-        // segment so far, walk the merge alias for the display label,
-        // and join on the in-memory talk-time map.
         let database = coordinator.database
-        let rawRows = try await database.queue.read { db -> [Row] in
-            try Row.fetchAll(
-                db,
-                sql: """
-                SELECT s.id AS id,
-                       s.source AS source,
-                       COALESCE(merged.display_label, s.display_label) AS label,
-                       COALESCE(s.merged_into_speaker_id, s.id) AS effective_id
-                FROM speakers s
-                LEFT JOIN speakers merged ON merged.id = s.merged_into_speaker_id
-                WHERE s.meeting_id = ?
-                  AND s.merged_into_speaker_id IS NULL
-                ORDER BY s.source, s.raw_speaker_id
-                """,
-                arguments: [meetingID]
-            )
+        let rawRows = try await database.queue.read { db in
+            try SpeakerQueries.visibleSpeakers(meetingID: meetingID, in: db)
         }
         return rawRows.compactMap { row -> SpeakerRowModel? in
             guard let id: Int64 = row["id"],
                   let source: String = row["source"],
-                  let label: String = row["label"]
+                  let label: String = row["display_label"]
             else { return nil }
             let effective: Int64 = row["effective_id"] ?? id
             return SpeakerRowModel(

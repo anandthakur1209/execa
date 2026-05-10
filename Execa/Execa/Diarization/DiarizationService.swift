@@ -91,7 +91,42 @@ actor DiarizationService {
             )
             return
         }
+        // Phase 3.5: speaker bleed-through dedup. Runs in a SEPARATE
+        // `database.queue.write` block from the swap, not the same
+        // transaction. The two-write design is intentional:
+        //   - Testability: `SpeakerBleedDeduper` has independent DB-
+        //     driven coverage (`SpeakerBleedDedupIntegrationTests`)
+        //     that exercises a swap-then-dedup-then-assert flow
+        //     without a giant transaction-scoped fixture.
+        //   - Maintainability: `swapInDatabase` stays under its
+        //     existing complexity budget.
+        // Trade-off: there's a millisecond-scale crash window between
+        // the writes; if execa crashes BETWEEN swap and dedup, the
+        // user sees Phase-3-style duplicates in the meeting detail
+        // view. Recovery: Re-run diarization re-applies both. Future
+        // maintainers tempted to collapse this into one transaction:
+        // please read this comment + the Phase 3.5 plan first.
+        await runDedupPass(meetingID: meetingID)
         await applyStatus(meetingID: meetingID, status: .completed(at: Date()))
+    }
+
+    private func runDedupPass(meetingID: String) async {
+        let enabled = await (try? settings.autoSpeakerBleedDedup()) ?? true
+        guard enabled else { return }
+        do {
+            let result = try await database.queue.write { db in
+                try SpeakerBleedDeduper.dedup(meetingID: meetingID, in: db)
+            }
+            if !result.dedupedPairs.isEmpty {
+                let count = result.dedupedPairs.count
+                _ = count // os_log site (Phase 4 wires the central log handle).
+            }
+        } catch {
+            // Dedup is a polish pass; failure is non-fatal. The swap
+            // succeeded, so the meeting is still usable — just with
+            // Phase-3-style duplicates visible. The user can Re-run
+            // diarization to retry.
+        }
     }
 
     // MARK: - Pipeline pieces

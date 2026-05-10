@@ -205,17 +205,8 @@ struct MeetingDetailView: View {
     private func loadSpeakerRows() async -> [SpeakerRowModel] {
         let database = coordinator.database
         let meeting = meetingID
-        let rawRows = await (try? database.queue.read { db -> [Row] in
-            try Row.fetchAll(
-                db,
-                sql: """
-                SELECT s.id AS id, s.source AS source, s.display_label AS label
-                FROM speakers s
-                WHERE s.meeting_id = ? AND s.merged_into_speaker_id IS NULL
-                ORDER BY s.source, s.raw_speaker_id
-                """,
-                arguments: [meeting]
-            )
+        let rawRows = await (try? database.queue.read { db in
+            try SpeakerQueries.visibleSpeakers(meetingID: meeting, in: db)
         }) ?? []
         let talkTime = await (try? database.queue.read { db in
             try SpeakerQueries.talkTimeAggregated(meetingID: meeting, in: db)
@@ -223,9 +214,10 @@ struct MeetingDetailView: View {
         return rawRows.compactMap { row -> SpeakerRowModel? in
             guard let id: Int64 = row["id"],
                   let source: String = row["source"],
-                  let label: String = row["label"]
+                  let label: String = row["display_label"]
             else { return nil }
-            let ms = talkTime[id] ?? 0
+            let effective: Int64 = row["effective_id"] ?? id
+            let ms = talkTime[effective] ?? 0
             return SpeakerRowModel(
                 id: id,
                 label: label,
@@ -238,6 +230,10 @@ struct MeetingDetailView: View {
     private func loadTranscriptLines() async -> [TranscriptDisplayLine] {
         let database = coordinator.database
         let meeting = meetingID
+        // Phase 3.5: skip rows soft-deleted by speaker bleed-through
+        // dedup. The audit trail lives on those rows
+        // (`deduped_against_segment_id`); the UI honours it by
+        // filtering them out.
         let lineRows = await (try? database.queue.read { db -> [Row] in
             try Row.fetchAll(
                 db,
@@ -249,7 +245,9 @@ struct MeetingDetailView: View {
                 FROM transcript_segments t
                 JOIN speakers s ON s.id = t.speaker_id
                 LEFT JOIN speakers merged ON merged.id = s.merged_into_speaker_id
-                WHERE t.meeting_id = ? AND t.is_final = 1
+                WHERE t.meeting_id = ?
+                  AND t.is_final = 1
+                  AND t.deduped_against_segment_id IS NULL
                 ORDER BY t.start_ms ASC, t.id ASC
                 """,
                 arguments: [meeting]

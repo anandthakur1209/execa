@@ -58,7 +58,9 @@ enum SpeakerQueries {
     /// Aggregates `(end_ms - start_ms)` over all final segments,
     /// grouping by the canonical speaker after walking aliases. Useful
     /// for the speaker sidebar (live + post-meeting) and for the
-    /// detail view's per-speaker breakdown.
+    /// detail view's per-speaker breakdown. Phase 3.5: filters out
+    /// segments soft-deleted by the bleed-through dedup pass so
+    /// duplicate-talk-time isn't counted.
     ///
     /// Returns `[canonicalSpeakerID: totalMs]`. Speakers with zero
     /// segments are omitted.
@@ -78,7 +80,9 @@ enum SpeakerQueries {
                 SUM(t.end_ms - t.start_ms) AS total_ms
             FROM transcript_segments t
             JOIN speakers s ON s.id = t.speaker_id
-            WHERE t.meeting_id = ? AND t.is_final = 1
+            WHERE t.meeting_id = ?
+              AND t.is_final = 1
+              AND t.deduped_against_segment_id IS NULL
             GROUP BY effective_id
             """,
             arguments: [meetingID]
@@ -90,5 +94,45 @@ enum SpeakerQueries {
             result[effectiveID, default: 0] += max(0, total)
         }
         return result
+    }
+
+    /// Lists the canonical (un-merged) speakers for a meeting that
+    /// are still visible after the Phase 3.5 dedup pass — i.e. each
+    /// returned speaker has at least one final segment whose
+    /// `deduped_against_segment_id IS NULL`. Single source of truth
+    /// for the orphan-mic-speaker filter; `SpeakerSidebar.derive` and
+    /// `MeetingDetailView.loadSpeakerRows` both call this so any
+    /// future call site that lists speakers stays in sync.
+    ///
+    /// Returns rows in `(source, raw_speaker_id)` order with columns:
+    /// `id`, `source`, `raw_speaker_id`, `display_label`,
+    /// `effective_id` (post-merge canonical id, falls back to `id`
+    /// when not merged).
+    static func visibleSpeakers(
+        meetingID: String,
+        in db: GRDB.Database
+    ) throws -> [Row] {
+        try Row.fetchAll(
+            db,
+            sql: """
+            SELECT s.id AS id,
+                   s.source AS source,
+                   s.raw_speaker_id AS raw_speaker_id,
+                   COALESCE(merged.display_label, s.display_label) AS display_label,
+                   COALESCE(s.merged_into_speaker_id, s.id) AS effective_id
+            FROM speakers s
+            LEFT JOIN speakers merged ON merged.id = s.merged_into_speaker_id
+            WHERE s.meeting_id = ?
+              AND s.merged_into_speaker_id IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM transcript_segments t
+                  WHERE t.speaker_id = s.id
+                    AND t.is_final = 1
+                    AND t.deduped_against_segment_id IS NULL
+              )
+            ORDER BY s.source, s.raw_speaker_id
+            """,
+            arguments: [meetingID]
+        )
     }
 }
