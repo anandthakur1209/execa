@@ -8,7 +8,7 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 
 ## Current status
 
-**Phase 3 complete (tagged `phase-3`). Ready for Phase 4.** Phase 0 + Phase 1 + Phase 2 + Phase 3 are landed end-to-end. On top of Phase 2's live transcript: the post-meeting Sarvam batch diarization pipeline runs automatically at `stopMeeting` (gated by the `auto_diarization` setting, default-on), submitting `mic.wav` and `system.wav` as two parallel jobs to the Sarvam batch v1 endpoint. The result is reconciled into the DB via an authoritative-replace swap — old `speakers` and `transcript_segments` rows for the meeting are wiped and rebuilt from batch defaults, with the mid-meeting `(mic, raw_speaker_id=0)` rename preserved across the swap (Decision 17). The `SpeakerSidebar` (live) and `MeetingDetailView` (post-meeting) host single-click inline rename + a cross-source merge picker; transcript turns carry a right-click "Split into new speaker…" affordance. Voice-sample playback (3 s ending at the most-recent segment) walks the merge alias to the canonical speaker per Revision 5. The "Open last meeting" menu-bar item reaches the detail window without a TTL (Revision 4). Sarvam batch wire contract was discovered via `scripts/sarvam-batch-probe.swift` and locked into DECISIONS.md.
+**Phase 3 complete (tagged `phase-3`). Phase 3.5 in progress.** Phase 0 + Phase 1 + Phase 2 + Phase 3 are landed end-to-end. On top of Phase 2's live transcript: the post-meeting Sarvam batch diarization pipeline runs automatically at `stopMeeting` (gated by the `auto_diarization` setting, default-on), submitting `mic.wav` and `system.wav` as two parallel jobs to the Sarvam batch v1 endpoint. The result is reconciled into the DB via an authoritative-replace swap — old `speakers` and `transcript_segments` rows for the meeting are wiped and rebuilt from batch defaults, with the mid-meeting `(mic, raw_speaker_id=0)` rename preserved across the swap (Decision 17). The `SpeakerSidebar` (live) and `MeetingDetailView` (post-meeting) host single-click inline rename + a cross-source merge picker; transcript turns carry a right-click "Split into new speaker…" affordance. Voice-sample playback (3 s ending at the most-recent segment) walks the merge alias to the canonical speaker per Revision 5. The "Open last meeting" menu-bar item reaches the detail window without a TTL (Revision 4). Sarvam batch wire contract was discovered via `scripts/sarvam-batch-probe.swift` and locked into DECISIONS.md.
 
 Phase 2's known issue (Resume after bad-key replacement requires relaunch) carries forward.
 
@@ -103,6 +103,29 @@ Phase 2's known issue (Resume after bad-key replacement requires relaunch) carri
 - Merge two speakers (including cross-source) → both clusters point to the same effective `display_label`; talk-time aggregates correctly.
 - Split → introduces a new `speakers` row and reassigns selected segments.
 - Back-to-back meetings each diarize independently (the "do it twice" gate from Phase 2's lessons-learned).
+
+---
+
+## Phase 3.5 — Speaker bleed-through dedup
+
+**Goal:** When the user runs a meeting on built-in speakers (no headphones), the laptop's speakers play remote audio into the room and the mic re-captures it; the same remote voice gets transcribed both as a system-side `Speaker N` AND a mic-side `In-room N+1`. Phase 3.5 ships a deterministic post-batch dedup pass that recognises the mirror pattern and soft-deletes the mic-side rows. The thorough fix (acoustic echo cancellation via Voice Processing IO) is parked per the Phase 1 closeout decision; this phase is the deterministic alternative.
+
+**Scope:**
+- v4 migration: `transcript_segments.deduped_against_segment_id INTEGER REFERENCES transcript_segments(id) ON DELETE SET NULL`. Soft-delete + audit on the same column.
+- `Diarization/SpeakerBleedDeduper.swift` — pure-function namespace running inside a caller-provided GRDB write block. Algorithm: for each mic-side segment M, find any system-side segment S with ≥50% time overlap (relative to the shorter side) AND ≥0.6 jaccard text similarity (lowercased + unicode-tokenized); flag M as bleed-of-S. Skip pairs where either side is < 1 s or has confidence < 0.6. NULL confidence proceeds.
+- `Persistence/SpeakerQueries.swift` — new helper `visibleSpeakers(meetingID:in:)` filtering out `speakers` rows whose every segment has `deduped_against_segment_id IS NOT NULL`. `talkTimeAggregated` adds the same filter. Single source of truth for the orphan-speaker `EXISTS` predicate.
+- `Diarization/DiarizationService.runForMeeting` — gates dedup on `auto_speaker_bleed_dedup` setting (default `true`); runs in a follow-up `database.queue.write` after swap (NOT same transaction — testability + maintainability trade-off documented inline). Re-run diarization re-applies the dedup; never preserves previous dedup decisions.
+- UI filters: `SpeakerSidebar.derive` and `MeetingDetailView` queries call `visibleSpeakers` for orphan-speaker filtering and add `WHERE t.deduped_against_segment_id IS NULL` to transcript-row queries.
+- Settings: `auto_speaker_bleed_dedup` key on `settings` table, default `true`. Reachable only via direct DB edit until Phase 5's Settings UI.
+- Direction is one-way: mic-side flagged as bleed of system-side; never the reverse. The user's voice loop-back via system audio is rare and bidirectional dedup risks losing legitimate mic-side speech.
+
+**Acceptance:**
+- Speaker-mode meeting playing single-voice content through laptop speakers → post-diarization, only system-side `Speaker N` rows appear in the sidebar; mic-side rows exist in DB but are filtered. `transcript_segments.deduped_against_segment_id` populated on the soft-deleted mic-side rows pointing at the surviving system-side IDs.
+- Paraphrase guard: mic-side user paraphrases a system-side remote speaker's sentence → both turns are visible (text similarity below threshold).
+- `auto_speaker_bleed_dedup=false` → dedup pass skipped entirely; both mic and system rows visible (Phase 3 behavior).
+- Re-run diarization re-applies dedup against the freshly-swapped state.
+- Back-to-back meetings each dedup independently per `meeting_id` (the "do it twice" gate from Phase 2's lessons-learned).
+- Phase-3-era meetings on disk render unchanged after v4 migration (column is NULL → filter is a no-op).
 
 ---
 

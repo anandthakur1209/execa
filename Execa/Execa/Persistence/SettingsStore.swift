@@ -11,6 +11,13 @@ enum SettingsKey: String {
     /// "Re-run diarization" button in `MeetingDetailView` is independent
     /// of this toggle and always available.
     case autoDiarization = "auto_diarization"
+    /// Whether `DiarizationService.runForMeeting` runs the speaker
+    /// bleed-through dedup pass after `swapInDatabase` succeeds.
+    /// Default `true` — a missing row reads as enabled. Power users
+    /// can disable by editing the row directly; a Settings UI lands in
+    /// Phase 5. Disabling is the recovery path for the rare device-
+    /// owner-repeats-system case (DECISIONS.md Phase 3.5 entry).
+    case autoSpeakerBleedDedup = "auto_speaker_bleed_dedup"
 }
 
 struct SettingsStore {
@@ -54,6 +61,16 @@ struct SettingsStore {
     /// disable the post-meeting batch pipeline for fresh installs.
     func autoDiarization() async throws -> Bool {
         let raw = try await string(forKey: .autoDiarization)
+        guard let raw else { return true }
+        return raw == "true"
+    }
+
+    /// Reads the `auto_speaker_bleed_dedup` setting; defaults to `true`
+    /// when the row is missing (Phase 3.5 ships with dedup on by
+    /// default). Same default-on semantics as `autoDiarization` —
+    /// fresh installs get the full pipeline.
+    func autoSpeakerBleedDedup() async throws -> Bool {
+        let raw = try await string(forKey: .autoSpeakerBleedDedup)
         guard let raw else { return true }
         return raw == "true"
     }

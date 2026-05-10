@@ -166,6 +166,26 @@ final nonisolated class Database: @unchecked Sendable {
                 ALTER TABLE meetings ADD COLUMN diarization_error TEXT;
             """)
         }
+        // Phase 3.5: speaker bleed-through dedup. Adds a soft-delete +
+        // audit column on `transcript_segments`. After
+        // `DiarizationSwap` lands the batch result, `SpeakerBleedDeduper`
+        // identifies mic-side segments that mirror a system-side
+        // segment in time (≥50% overlap of the shorter side) AND text
+        // (≥0.6 jaccard) and sets their `deduped_against_segment_id`
+        // to the surviving system-side row. All rendering queries
+        // filter `WHERE deduped_against_segment_id IS NULL`. ON DELETE
+        // SET NULL on the FK so deleting the surviving row leaves the
+        // soft-deleted row in a clean (un-audited) state rather than
+        // cascading further. Speakers rows whose every segment is
+        // deduped are filtered at the view layer (`SpeakerQueries.
+        // visibleSpeakers`); not physically deleted, to preserve audit.
+        migrator.registerMigration("v4_speaker_bleed_dedup") { db in
+            try db.execute(sql: """
+                ALTER TABLE transcript_segments
+                ADD COLUMN deduped_against_segment_id INTEGER
+                    REFERENCES transcript_segments(id) ON DELETE SET NULL;
+            """)
+        }
         return migrator
     }()
 }
