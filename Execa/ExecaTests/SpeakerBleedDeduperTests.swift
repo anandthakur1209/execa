@@ -4,11 +4,16 @@ import Testing
 
 /// Pure-function tests for `SpeakerBleedDeduper`. No DB hookup —
 /// drives `pairsToDedup`, `timeOverlapFraction`, `jaccardTextSimilarity`,
-/// `tokenize` directly with synthetic `Segment` arrays. Boundary
-/// coverage on both thresholds (49/50% overlap, 59/60% jaccard) plus
-/// the early-skip filters (sub-second duration, low confidence,
-/// empty text). Integration through `DiarizationService` is covered
-/// by `SpeakerBleedDedupIntegrationTests` in commit 3.
+/// `tokenize` directly with synthetic `Segment` arrays.
+///
+/// Phase 3.5b: tests forked into v1 (the Phase 3.5 Jaccard algorithm,
+/// pinned forever — these tests exercise the `version: .v1` branch)
+/// and v2 (Phase 3.5b containment + stemming + concat + cross-val,
+/// lands across commits (b)/(c)/(d)). Regression tests at the bottom
+/// pin both the v1 failure mode (30-token mic ⊂ 90-token system →
+/// jaccard 0.33 → not flagged) and the v2 success (same input →
+/// containment 1.0 → flagged). The v2 success test is
+/// `@Test(.disabled)` in commit (a) and re-enabled in commit (b).
 struct SpeakerBleedDeduperTests {
     private static func mic(id: Int64, start: Int, end: Int, text: String,
                             confidence: Double? = nil) -> SpeakerBleedDeduper.Segment {
@@ -20,7 +25,7 @@ struct SpeakerBleedDeduperTests {
         .init(id: id, speakerID: 200, source: "system", startMs: start, endMs: end, text: text, confidence: confidence)
     }
 
-    // MARK: - Time overlap
+    // MARK: - Time overlap (shared v1/v2)
 
     @Test func timeOverlapFractionAt49PercentBoundary() {
         // Mic 0–1000 ms (1000 ms duration). System 510–2000 ms (1490 ms
@@ -48,7 +53,7 @@ struct SpeakerBleedDeduperTests {
         #expect(SpeakerBleedDeduper.timeOverlapFraction(mic: micSeg, system: systemSeg) == 0)
     }
 
-    // MARK: - Jaccard
+    // MARK: - Jaccard (v1 scoring; kept as audit-only in v2)
 
     @Test func jaccardSimilarityAt59PercentBoundary() {
         // 5 shared tokens out of 9 union = 5/9 ≈ 0.5555. Below 0.6,
@@ -90,90 +95,119 @@ struct SpeakerBleedDeduperTests {
         #expect(SpeakerBleedDeduper.jaccardTextSimilarity("", "") == 0)
     }
 
-    // MARK: - pairsToDedup orchestration
+    // MARK: - V1 pairsToDedup orchestration
 
-    @Test func mirroredMicSystemFlagged() {
+    @Test func mirroredMicSystemFlaggedV1() {
         // Mic mirrors system: 90% overlap, identical text. Should flag
-        // mic.
+        // mic under v1.
         let mics = [Self.mic(id: 1, start: 100, end: 1500, text: "hello world from remote")]
         let systems = [Self.sys(id: 2, start: 0, end: 1600, text: "hello world from remote")]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
         #expect(pairs.count == 1)
-        #expect(pairs[0] == (1, 2))
+        #expect(pairs.first?.dedupedID == 1)
+        #expect(pairs.first?.againstID == 2)
+        #expect(pairs.first?.promotionReason == .pairwise)
     }
 
-    @Test func paraphraseNotFlagged() {
+    @Test func paraphraseNotFlaggedV1() {
         // Mic paraphrases system: time overlap is high but the
         // jaccard is low (different word choice).
         let mics = [Self.mic(id: 1, start: 0, end: 2000, text: "you mean to say their numbers improved")]
         let systems = [Self.sys(id: 2, start: 0, end: 2000, text: "the quarterly figures showed strong growth")]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
         #expect(pairs.isEmpty, "paraphrase should not be deduped; got \(pairs)")
     }
 
-    @Test func subSecondMicSegmentSkipped() {
-        // 999 ms mic → below the 1000 ms duration floor; skip.
+    @Test func subSecondMicSegmentSkippedV1() {
         let mics = [Self.mic(id: 1, start: 0, end: 999, text: "hello")]
         let systems = [Self.sys(id: 2, start: 0, end: 5000, text: "hello world")]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
         #expect(pairs.isEmpty)
     }
 
-    @Test func subSecondSystemSegmentSkipped() {
-        // 999 ms system → also blocks dedup.
+    @Test func subSecondSystemSegmentSkippedV1() {
         let mics = [Self.mic(id: 1, start: 0, end: 5000, text: "hello world")]
         let systems = [Self.sys(id: 2, start: 0, end: 999, text: "hello")]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
         #expect(pairs.isEmpty)
     }
 
-    @Test func lowConfidenceMicSkipped() {
-        // Mic confidence 0.59 — explicitly below the 0.6 threshold.
+    @Test func lowConfidenceMicSkippedV1() {
         let mics = [Self.mic(id: 1, start: 0, end: 1500, text: "hello world", confidence: 0.59)]
         let systems = [Self.sys(id: 2, start: 0, end: 1500, text: "hello world", confidence: 0.9)]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
         #expect(pairs.isEmpty)
     }
 
-    @Test func nullConfidenceProceeds() {
-        // NULL confidence on either side should NOT block dedup —
-        // Sarvam batch may not always emit confidence.
+    @Test func nullConfidenceProceedsV1() {
         let mics = [Self.mic(id: 1, start: 0, end: 1500, text: "hello world", confidence: nil)]
         let systems = [Self.sys(id: 2, start: 0, end: 1500, text: "hello world", confidence: nil)]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
         #expect(pairs.count == 1)
     }
 
-    @Test func emptyMicTextSkipped() {
+    @Test func emptyMicTextSkippedV1() {
         let mics = [Self.mic(id: 1, start: 0, end: 1500, text: "")]
         let systems = [Self.sys(id: 2, start: 0, end: 1500, text: "hello world")]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
         #expect(pairs.isEmpty)
     }
 
-    @Test func singleSourceMeetingProducesNoPairs() {
-        // No system segments → nothing to dedup against.
+    @Test func singleSourceMeetingProducesNoPairsV1() {
         let mics = [Self.mic(id: 1, start: 0, end: 1500, text: "hello world")]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics, version: .v1)
         #expect(pairs.isEmpty)
     }
 
-    @Test func emptyMeetingProducesNoPairs() {
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: [])
+    @Test func emptyMeetingProducesNoPairsV1() {
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: [], version: .v1)
         #expect(pairs.isEmpty)
     }
 
-    @Test func micFlaggedAgainstFirstMatchingSystemOnly() {
-        // Two system segments could both match. The deduper should
-        // flag against the FIRST match and stop — preserves a stable
-        // audit pointer.
+    @Test func micFlaggedAgainstFirstMatchingSystemOnlyV1() {
         let mics = [Self.mic(id: 1, start: 0, end: 2000, text: "hello world")]
         let systems = [
             Self.sys(id: 2, start: 0, end: 2000, text: "hello world"),
             Self.sys(id: 3, start: 0, end: 2000, text: "hello world")
         ]
-        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems)
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
         #expect(pairs.count == 1)
-        #expect(pairs[0] == (1, 2), "should match first system segment, not second")
+        #expect(pairs.first?.dedupedID == 1)
+        #expect(pairs.first?.againstID == 2, "should match first system segment, not second")
+    }
+
+    // MARK: - Regression: mic ⊂ system pattern (the v1→v2 motivation)
+
+    @Test func regressionMicFragmentOfLongerSystemNotFlaggedInV1() {
+        // The exact pattern from manual smoke that motivated Phase
+        // 3.5b: 30 mic tokens, all present in a 90-token system
+        // segment, at 90%+ time overlap. Jaccard = 30/90 = 0.33,
+        // below 0.6 threshold → v1 correctly skips per its rule but
+        // incorrectly leaves a visible duplicate. This test pins the
+        // v1 failure mode forever — if a future maintainer "improves"
+        // v1, this test surfaces the change.
+        let micTokens = (1 ... 30).map { "tok\($0)" }
+        let systemTokens = (1 ... 90).map { "tok\($0)" }
+        let mics = [Self.mic(id: 1, start: 1000, end: 4000, text: micTokens.joined(separator: " "))]
+        let systems = [Self.sys(id: 2, start: 0, end: 10000, text: systemTokens.joined(separator: " "))]
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v1)
+        #expect(pairs.isEmpty, "v1's jaccard threshold does NOT flag this pattern; pinning the failure mode")
+    }
+
+    @Test(.disabled("v2 lands in commit (b)"))
+    func regressionMicFragmentOfLongerSystemFlaggedInV2() {
+        // Same data as the v1 regression test above. Under v2,
+        // containment = 30/30 = 1.0 ≥ 0.75 → flagged. This test is
+        // disabled in commit (a) (v2 placeholder delegates to v1, so
+        // it would fail) and re-enabled in commit (b) once the v2
+        // pairwise core lands.
+        let micTokens = (1 ... 30).map { "tok\($0)" }
+        let systemTokens = (1 ... 90).map { "tok\($0)" }
+        let mics = [Self.mic(id: 1, start: 1000, end: 4000, text: micTokens.joined(separator: " "))]
+        let systems = [Self.sys(id: 2, start: 0, end: 10000, text: systemTokens.joined(separator: " "))]
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v2)
+        #expect(pairs.count == 1, "v2's containment-based scoring SHOULD flag this pattern")
+        #expect(pairs.first?.dedupedID == 1)
+        #expect(pairs.first?.againstID == 2)
     }
 }

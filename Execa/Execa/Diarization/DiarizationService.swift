@@ -111,11 +111,21 @@ actor DiarizationService {
     }
 
     private func runDedupPass(meetingID: String) async {
+        // Two settings, orthogonal:
+        //   - `auto_speaker_bleed_dedup` decides WHETHER the pass runs.
+        //   - `bleed_dedup_algorithm_version` decides WHICH algorithm
+        //     (`.v1` = Phase 3.5 Jaccard; `.v2` = Phase 3.5b
+        //     containment + Porter-light stemming + concatenation
+        //     pre-pass + cross-validation post-pass).
+        // Both default-on / default-v2 via the SettingsStore accessors;
+        // direct DB edit is the only way to disable until Phase 5's
+        // Settings UI ships.
         let enabled = await (try? settings.autoSpeakerBleedDedup()) ?? true
         guard enabled else { return }
+        let version = await (try? settings.bleedDedupAlgorithmVersion()) ?? .v1
         do {
             let result = try await database.queue.write { db in
-                try SpeakerBleedDeduper.dedup(meetingID: meetingID, in: db)
+                try SpeakerBleedDeduper.dedup(meetingID: meetingID, version: version, in: db)
             }
             if !result.dedupedPairs.isEmpty {
                 let count = result.dedupedPairs.count

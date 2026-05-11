@@ -4,37 +4,33 @@ import GRDB
 /// Post-batch dedup pass that removes mic-side `transcript_segments`
 /// rows mirroring system-side rows in time AND text — the deterministic
 /// alternative to AEC for speaker-mode meetings (DECISIONS.md
-/// Phase 3.5 entry). Soft-delete via the
+/// Phase 3.5 + 2026-05-11 Phase 3.5b entries). Soft-delete via the
 /// `transcript_segments.deduped_against_segment_id` column added in v4
 /// migration: flagged rows stay in the DB for audit; rendering queries
 /// filter them out via `WHERE deduped_against_segment_id IS NULL`.
 ///
-/// Algorithm (per mic-side segment M, against each system-side
-/// segment S in the same meeting):
+/// Phase 3.5 shipped v1 of the algorithm (Jaccard similarity at 0.6).
+/// Phase 3.5b commit (a) introduces the algorithm-version plumbing:
+/// `pairsToDedup` now dispatches on a `BleedDedupAlgorithmVersion`
+/// parameter. `pairsToDedupV1(segments:)` carries the unchanged v1
+/// logic. `pairsToDedupV2(segments:)` is a placeholder that delegates
+/// to v1 in commit (a); commits (b)/(c)/(d) replace its body with the
+/// containment + stemming + concatenation + cross-validation
+/// algorithm. The default in `SettingsStore.bleedDedupAlgorithmVersion`
+/// stays `.v1` for commit (a); it flips to `.v2` in commit (b).
 ///
-///   1. Skip if either segment's duration < `minSegmentDurationMs`.
-///   2. Skip if either segment has confidence below `minConfidence`
-///      (NULL confidence proceeds — Sarvam batch may not always emit).
-///   3. Skip if neither side has non-empty text (jaccard would be 0
-///      anyway; cheap fast-path).
-///   4. Skip if `timeOverlapFraction(M, S) < minOverlapFraction`.
-///      Overlap is computed against `min(mic_dur, system_dur)` —
-///      "this short mic segment was captured during this longer
-///      system segment" is the bleed-through pattern.
-///   5. Skip if `jaccardTextSimilarity(M.text, S.text) < minTextSimilarity`.
-///   6. Otherwise flag M as bleed-of-S; on post-pass, set
-///      `M.deduped_against_segment_id = S.id`.
-///
-/// Direction: ONLY mic→system (mic flagged as bleed of system). The
-/// reverse is rare in practice (the user's voice doesn't loop back
-/// through the system audio path) and the bidirectional case risks
-/// losing legitimate mic-side speech. See Decision 3 in the Phase 3.5
-/// plan.
+/// Direction is ALWAYS one-way: mic flagged as bleed of system. The
+/// reverse is rare (the user's voice doesn't loop back through the
+/// system audio path) and bidirectional dedup risks losing legitimate
+/// mic speech. See Decision 3 in the Phase 3.5 plan.
 enum SpeakerBleedDeduper {
+    // MARK: - Thresholds (v1 / shared with v2)
+
     /// Time-overlap fraction below which dedup never fires.
     static let minOverlapFraction: Double = 0.5
 
-    /// Jaccard text-similarity below which dedup never fires.
+    /// Jaccard text-similarity floor used by the v1 path. v2 uses
+    /// `minContainment` instead (lands in commit b).
     static let minTextSimilarity: Double = 0.6
 
     /// Segments shorter than this on either side are too noisy to
@@ -50,12 +46,14 @@ enum SpeakerBleedDeduper {
     /// purpose. A value of 0.59 explicitly skips; 0.6 is the boundary.
     static let minConfidence: Double = 0.6
 
+    // MARK: - Types
+
     /// One mic-or-system segment as the deduper sees it. Built from
     /// `transcript_segments` rows for one meeting. The `id` is the
     /// `transcript_segments.id` (used to write
     /// `deduped_against_segment_id`); `speakerID` is the
     /// `speakers.id` (used by view-layer filters when listing
-    /// orphan speakers).
+    /// orphan speakers and by the v2 cross-validation post-pass).
     struct Segment: Equatable {
         let id: Int64
         let speakerID: Int64
@@ -70,42 +68,89 @@ enum SpeakerBleedDeduper {
         }
     }
 
-    /// Runs the dedup pass for one meeting. Caller wraps the call in
-    /// a `database.queue.write { db in ... }` block; this function
-    /// reads + writes against `db` directly. Returns a `DedupResult`
-    /// for logging / test assertions.
-    static func dedup(meetingID: String, in db: GRDB.Database) throws -> DedupResult {
+    // MARK: - DB entry point
+
+    /// Runs the dedup pass for one meeting under the given algorithm
+    /// `version`. Caller wraps the call in a
+    /// `database.queue.write { db in ... }` block; this function reads
+    /// + writes against `db` directly. Returns a `DedupResult` for
+    /// logging / test assertions.
+    static func dedup(
+        meetingID: String,
+        version: BleedDedupAlgorithmVersion,
+        in db: GRDB.Database
+    ) throws -> DedupResult {
         let segments = try loadSegments(meetingID: meetingID, in: db)
-        let pairs = pairsToDedup(segments: segments)
-        for (dedupedID, againstID) in pairs {
+        let pairs = pairsToDedup(segments: segments, version: version)
+        for pair in pairs {
             try db.execute(
                 sql: """
                 UPDATE transcript_segments
                 SET deduped_against_segment_id = ?
                 WHERE id = ?
                 """,
-                arguments: [againstID, dedupedID]
+                arguments: [pair.againstID, pair.dedupedID]
             )
         }
-        return DedupResult(dedupedPairs: pairs)
+        return DedupResult(pairs: pairs)
     }
 
-    /// Pure-function core. Given the meeting's segments, returns the
-    /// list of `(mic_segment_id, system_segment_id)` pairs that
-    /// should be soft-deleted. No DB access; testable in isolation.
-    /// Callers do the SQL UPDATEs.
-    static func pairsToDedup(segments: [Segment]) -> [(Int64, Int64)] {
+    // MARK: - Algorithm dispatcher
+
+    /// Pure-function core. Given the meeting's segments and an
+    /// algorithm version, returns the `DedupPair`s that should be
+    /// soft-deleted. No DB access; testable in isolation. Callers do
+    /// the SQL UPDATEs via `dedup(meetingID:version:in:)`.
+    static func pairsToDedup(
+        segments: [Segment],
+        version: BleedDedupAlgorithmVersion = .v2
+    ) -> [DedupPair] {
+        switch version {
+        case .v1: pairsToDedupV1(segments: segments)
+        case .v2: pairsToDedupV2(segments: segments)
+        }
+    }
+
+    // MARK: - V1: Jaccard pairwise (Phase 3.5 algorithm, unchanged)
+
+    /// V1 (Phase 3.5): pairwise pass using Jaccard similarity at 0.6
+    /// threshold. Kept untouched as a flag-fallback when
+    /// `bleed_dedup_algorithm_version = "v1"`. Audit pairs carry the
+    /// jaccard score; containment is computed and stored too so the
+    /// audit fields are symmetric across versions.
+    static func pairsToDedupV1(segments: [Segment]) -> [DedupPair] {
         let mics = segments.filter { $0.source == "mic" }
         let systems = segments.filter { $0.source == "system" }
         guard !mics.isEmpty, !systems.isEmpty else { return [] }
         return mics.compactMap { mic in
             guard isEligible(mic) else { return nil }
-            guard let match = systems.first(where: { isMatch(mic: mic, system: $0) }) else {
+            guard let match = systems.first(where: { isMatchV1(mic: mic, system: $0) }) else {
                 return nil
             }
-            return (mic.id, match.id)
+            let jaccard = jaccardTextSimilarity(mic.text, match.text)
+            return DedupPair(
+                dedupedID: mic.id,
+                againstID: match.id,
+                containment: nil,
+                jaccard: jaccard,
+                promotionReason: .pairwise
+            )
         }
     }
+
+    // MARK: - V2: placeholder (replaced in commit b)
+
+    /// V2 placeholder. Commit (a) delegates to v1 so the test surface
+    /// stays stable while the dispatcher and audit-struct refactor
+    /// land. Commit (b) replaces the body with the
+    /// containment + Porter-light stemming pairwise core; commit (c)
+    /// adds the concatenation pre-pass; commit (d) adds the
+    /// cross-validation post-pass.
+    static func pairsToDedupV2(segments: [Segment]) -> [DedupPair] {
+        pairsToDedupV1(segments: segments)
+    }
+
+    // MARK: - Eligibility + V1 matching
 
     /// True iff the segment passes the duration / confidence / non-
     /// empty-text gate that applies to BOTH sides of a candidate pair.
@@ -115,13 +160,15 @@ enum SpeakerBleedDeduper {
         return !segment.text.isEmpty
     }
 
-    /// True iff `system` is eligible AND meets both the time-overlap
-    /// and text-similarity thresholds against `mic`.
-    private static func isMatch(mic: Segment, system: Segment) -> Bool {
+    /// V1: `system` is eligible AND meets both the time-overlap and
+    /// jaccard-similarity thresholds against `mic`.
+    private static func isMatchV1(mic: Segment, system: Segment) -> Bool {
         guard isEligible(system) else { return false }
         guard timeOverlapFraction(mic: mic, system: system) >= minOverlapFraction else { return false }
         return jaccardTextSimilarity(mic.text, system.text) >= minTextSimilarity
     }
+
+    // MARK: - Shared scoring primitives
 
     /// Time-overlap fraction relative to `min(mic_duration,
     /// system_duration)`. Returns 0.0 if either duration is 0.
@@ -155,7 +202,10 @@ enum SpeakerBleedDeduper {
     /// Splits text on unicode whitespace + punctuation into lowercased
     /// non-empty tokens. Devanagari and other non-ASCII scripts work
     /// because we use `CharacterSet.alphanumerics.inverted` for the
-    /// split (Foundation respects unicode general categories).
+    /// split (Foundation respects unicode general categories). No
+    /// stemming — v1 used this directly; v2 (commit b) introduces
+    /// `tokenList(_:)` alongside that applies the Porter-light
+    /// stemmer.
     static func tokenize(_ text: String) -> Set<String> {
         let lower = text.lowercased()
         let separators = CharacterSet.alphanumerics.inverted
@@ -165,6 +215,8 @@ enum SpeakerBleedDeduper {
                 .filter { !$0.isEmpty }
         )
     }
+
+    // MARK: - DB loading
 
     private static func loadSegments(meetingID: String, in db: GRDB.Database) throws -> [Segment] {
         let rows = try Row.fetchAll(
@@ -200,19 +252,60 @@ enum SpeakerBleedDeduper {
     }
 }
 
-/// Result of one dedup pass. `dedupedPairs[i] = (deduped_segment_id,
-/// against_segment_id)` — the mic-side row that got soft-deleted and
-/// the system-side row it points at. Empty array means no-op
-/// (single-source meeting, empty meeting, or no pair met both
-/// thresholds).
-struct DedupResult: Equatable {
-    let dedupedPairs: [(Int64, Int64)]
+// MARK: - Algorithm version
 
-    static func == (lhs: DedupResult, rhs: DedupResult) -> Bool {
-        guard lhs.dedupedPairs.count == rhs.dedupedPairs.count else { return false }
-        for (lp, rp) in zip(lhs.dedupedPairs, rhs.dedupedPairs) where lp != rp {
-            return false
-        }
-        return true
+/// Selects which dedup algorithm runs. Phase 3.5 shipped v1 (Jaccard
+/// 0.6); Phase 3.5b ships v2 (containment 0.75 + Porter-light stemming
+/// + concatenation pre-pass + cross-validation post-pass). v1 is
+/// retained as a flag-fallback for A/B regression if v2 over-dedupes
+/// in real meetings.
+enum BleedDedupAlgorithmVersion: String, Equatable {
+    case v1
+    case v2
+}
+
+// MARK: - DedupPair + DedupResult
+
+/// Why a segment was flagged as bleed. Carried in `DedupPair` for
+/// in-memory audit only; the DB persists just the `deduped_against_
+/// segment_id` FK. Lets the manual-smoke story explain which v2 pass
+/// flagged each segment when debugging.
+enum PromotionReason: Equatable {
+    /// Flagged by the pairwise pass (v1 or v2) — single mic segment
+    /// matched against a single system segment.
+    case pairwise
+    /// Flagged by v2's concatenation pre-pass — multiple consecutive
+    /// same-speaker mic segments compared as one joined string
+    /// against one containing system segment.
+    case concatenation
+    /// Flagged by v2's cross-validation post-pass — a speaker-level
+    /// promotion that fires when ≥80% of a mic speaker's segments
+    /// (and ≥3 in absolute count) were already flagged by the
+    /// pairwise/concatenation passes.
+    case speakerPromotion
+}
+
+/// One flag in a dedup pass: a mic-side segment soft-deleted against
+/// a surviving system-side segment, with audit metadata. `containment`
+/// and `jaccard` are nil when the score isn't applicable to this
+/// flag's reason (e.g. speaker-promotion pairs don't go through
+/// pairwise scoring).
+struct DedupPair: Equatable {
+    let dedupedID: Int64
+    let againstID: Int64
+    let containment: Double?
+    let jaccard: Double?
+    let promotionReason: PromotionReason
+}
+
+/// Result of one dedup pass. `pairs` is the primary field carrying
+/// audit metadata for each soft-delete; `dedupedPairs` is a computed
+/// `[(Int64, Int64)]` projection for backward compat with code that
+/// only needs the ID pairs (existing tests pre-Phase-3.5b).
+struct DedupResult: Equatable {
+    let pairs: [DedupPair]
+
+    var dedupedPairs: [(Int64, Int64)] {
+        pairs.map { ($0.dedupedID, $0.againstID) }
     }
 }

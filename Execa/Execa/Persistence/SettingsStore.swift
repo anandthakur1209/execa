@@ -18,6 +18,15 @@ enum SettingsKey: String {
     /// Phase 5. Disabling is the recovery path for the rare device-
     /// owner-repeats-system case (DECISIONS.md Phase 3.5 entry).
     case autoSpeakerBleedDedup = "auto_speaker_bleed_dedup"
+    /// Which dedup algorithm `SpeakerBleedDeduper` runs when dedup is
+    /// enabled. `"v1"` = Phase 3.5 Jaccard pairwise; `"v2"` =
+    /// Phase 3.5b containment + Porter-light stemming + concatenation
+    /// pre-pass + cross-validation post-pass. Default `.v1` in commit
+    /// (a) of the Phase 3.5b plan (algorithm-version plumbing only);
+    /// flipped to `.v2` in commit (b) once the v2 core lands.
+    /// Orthogonal to `autoSpeakerBleedDedup`: that toggles WHETHER
+    /// dedup runs at all; this picks WHICH algorithm.
+    case bleedDedupAlgorithmVersion = "bleed_dedup_algorithm_version"
 }
 
 struct SettingsStore {
@@ -73,5 +82,17 @@ struct SettingsStore {
         let raw = try await string(forKey: .autoSpeakerBleedDedup)
         guard let raw else { return true }
         return raw == "true"
+    }
+
+    /// Reads the `bleed_dedup_algorithm_version` setting; defaults to
+    /// `.v1` in Phase 3.5b commit (a) (algorithm-version plumbing only;
+    /// behavior unchanged from Phase 3.5). Commit (b) flips the
+    /// default to `.v2` once the v2 algorithm core lands. Unknown
+    /// strings fall back to the default to defend against typos when
+    /// the user edits the row directly.
+    func bleedDedupAlgorithmVersion() async throws -> BleedDedupAlgorithmVersion {
+        let raw = try await string(forKey: .bleedDedupAlgorithmVersion)
+        guard let raw else { return .v1 }
+        return BleedDedupAlgorithmVersion(rawValue: raw) ?? .v1
     }
 }
