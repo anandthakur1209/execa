@@ -122,7 +122,7 @@ actor DiarizationService {
         // Settings UI ships.
         let enabled = await (try? settings.autoSpeakerBleedDedup()) ?? true
         guard enabled else { return }
-        let version = await (try? settings.bleedDedupAlgorithmVersion()) ?? .v1
+        let version = await (try? settings.bleedDedupAlgorithmVersion()) ?? .v2
         do {
             let result = try await database.queue.write { db in
                 try SpeakerBleedDeduper.dedup(meetingID: meetingID, version: version, in: db)

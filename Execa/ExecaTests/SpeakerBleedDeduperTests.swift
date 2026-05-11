@@ -194,13 +194,10 @@ struct SpeakerBleedDeduperTests {
         #expect(pairs.isEmpty, "v1's jaccard threshold does NOT flag this pattern; pinning the failure mode")
     }
 
-    @Test(.disabled("v2 lands in commit (b)"))
-    func regressionMicFragmentOfLongerSystemFlaggedInV2() {
+    @Test func regressionMicFragmentOfLongerSystemFlaggedInV2() {
         // Same data as the v1 regression test above. Under v2,
-        // containment = 30/30 = 1.0 ≥ 0.75 → flagged. This test is
-        // disabled in commit (a) (v2 placeholder delegates to v1, so
-        // it would fail) and re-enabled in commit (b) once the v2
-        // pairwise core lands.
+        // containment = 30/30 = 1.0 ≥ 0.75 → flagged. The Phase 3.5b
+        // proof point.
         let micTokens = (1 ... 30).map { "tok\($0)" }
         let systemTokens = (1 ... 90).map { "tok\($0)" }
         let mics = [Self.mic(id: 1, start: 1000, end: 4000, text: micTokens.joined(separator: " "))]
@@ -209,5 +206,148 @@ struct SpeakerBleedDeduperTests {
         #expect(pairs.count == 1, "v2's containment-based scoring SHOULD flag this pattern")
         #expect(pairs.first?.dedupedID == 1)
         #expect(pairs.first?.againstID == 2)
+        #expect(pairs.first?.containment == 1.0)
+        #expect(pairs.first?.promotionReason == .pairwise)
+    }
+
+    // MARK: - V2 containment boundaries
+
+    @Test func containmentAt74PercentBoundary() {
+        // Mic tokens: 100 unique, 74 shared with system. Containment
+        // = 74/100 = 0.74 — strictly below 0.75, should NOT flag.
+        let micTokens = (1 ... 100).map { "tok\($0)" }
+        let systemTokens = (1 ... 74).map { "tok\($0)" } + (200 ... 226).map { "extra\($0)" }
+        let containment = SpeakerBleedDeduper.containmentTextSimilarity(
+            mic: micTokens.joined(separator: " "),
+            system: systemTokens.joined(separator: " ")
+        )
+        #expect(containment < SpeakerBleedDeduper.minContainment, "containment was \(containment)")
+    }
+
+    @Test func containmentAt75PercentBoundary() {
+        let micTokens = (1 ... 100).map { "tok\($0)" }
+        let systemTokens = (1 ... 75).map { "tok\($0)" } + (200 ... 225).map { "extra\($0)" }
+        let containment = SpeakerBleedDeduper.containmentTextSimilarity(
+            mic: micTokens.joined(separator: " "),
+            system: systemTokens.joined(separator: " ")
+        )
+        #expect(containment >= SpeakerBleedDeduper.minContainment, "containment was \(containment)")
+    }
+
+    @Test func containmentAtFullMatchIsOne() {
+        let tokens = (1 ... 20).map { "tok\($0)" }.joined(separator: " ")
+        let containment = SpeakerBleedDeduper.containmentTextSimilarity(mic: tokens, system: tokens)
+        #expect(containment == 1.0)
+    }
+
+    @Test func containmentEmptyMicReturnsZero() {
+        #expect(SpeakerBleedDeduper.containmentTextSimilarity(mic: "", system: "anything") == 0)
+        #expect(SpeakerBleedDeduper.containmentTextSimilarity(mic: "", system: "") == 0)
+    }
+
+    // MARK: - V2 stemmer
+
+    @Test func stemAppliesIesToY() {
+        #expect(SpeakerBleedDeduper.stem("companies") == "company")
+    }
+
+    @Test func stemAppliesIedToY() {
+        #expect(SpeakerBleedDeduper.stem("tried") == "try")
+    }
+
+    @Test func stemStripsIngWhenStemLongEnough() {
+        #expect(SpeakerBleedDeduper.stem("training") == "train")
+    }
+
+    @Test func stemStripsEdWhenStemLongEnough() {
+        #expect(SpeakerBleedDeduper.stem("trained") == "train")
+    }
+
+    @Test func stemStripsEsWhenStemLongEnough() {
+        #expect(SpeakerBleedDeduper.stem("boxes") == "box")
+    }
+
+    @Test func stemStripsSWhenStemLongEnough() {
+        #expect(SpeakerBleedDeduper.stem("scripts") == "script")
+    }
+
+    @Test func stemDoesNotOverStemShortWords() {
+        // Min-stem guards protect these from catastrophic stripping.
+        #expect(SpeakerBleedDeduper.stem("his") == "his", "s-rule blocked by min-stem")
+        #expect(SpeakerBleedDeduper.stem("was") == "was", "s-rule blocked by min-stem")
+        #expect(SpeakerBleedDeduper.stem("yes") == "yes", "es-rule blocked by min-stem")
+        #expect(SpeakerBleedDeduper.stem("ring") == "ring", "ing-rule blocked by min-stem")
+        #expect(SpeakerBleedDeduper.stem("fed") == "fed", "ed-rule blocked by min-stem")
+        #expect(SpeakerBleedDeduper.stem("bed") == "bed", "ed-rule blocked by min-stem")
+    }
+
+    @Test func stemPassesThroughDevanagari() {
+        // Non-ASCII tokens skip the stemmer entirely.
+        #expect(SpeakerBleedDeduper.stem("नमस्ते") == "नमस्ते")
+        #expect(SpeakerBleedDeduper.stem("दुनिया") == "दुनिया")
+    }
+
+    @Test func stemRulePrecedence_EsFiresBeforeSRule() {
+        // "boxes" hits the es-rule (count 5 ≥ 5, post-strip len 3 ≥ 3)
+        // → "box". If the s-rule had higher precedence, it would
+        // strip only "s" → "boxe". The actual code order
+        // (ies, ied, ing, ed, es, s) means es wins for "boxes".
+        #expect(SpeakerBleedDeduper.stem("boxes") == "box")
+    }
+
+    @Test func stemDoesNotStemFourLetterUses() {
+        // "uses" (4 chars) is too short for any rule to fire safely:
+        // both s-rule (input ≥ 5) and es-rule (input ≥ 5) block on
+        // the input-length guard. Pass-through is correct —
+        // over-stemming to "us" or "use" without a word-list lookup
+        // would be a heuristic too aggressive for our domain.
+        #expect(SpeakerBleedDeduper.stem("uses") == "uses")
+    }
+
+    @Test func tokenListAppliesStemming() {
+        // Surface-form drift: "training scripts" tokenized + stemmed
+        // → ["train", "script"]. Matches the v2 motivation.
+        let tokens = SpeakerBleedDeduper.tokenList("Training scripts")
+        #expect(tokens == ["train", "script"])
+    }
+
+    // MARK: - V2 pairwise behaviour
+
+    @Test func paraphraseStillNotFlaggedInV2() {
+        // Phase 3.5 false-positive guard: legitimately different word
+        // choice at high time overlap stays not-flagged under v2 too.
+        // Tokenized & stemmed text shares few tokens → containment is
+        // low even though Jaccard would be irrelevant.
+        let mics = [Self.mic(id: 1, start: 0, end: 2000, text: "you mean to say their numbers improved")]
+        let systems = [Self.sys(id: 2, start: 0, end: 2000, text: "the quarterly figures showed strong growth")]
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v2)
+        #expect(pairs.isEmpty, "paraphrase should not be deduped under v2; got \(pairs)")
+    }
+
+    @Test func highContainmentLowOverlapNotFlaggedInV2() {
+        // Containment 1.0 but time-overlap below the 0.5 floor → not
+        // flagged. The overlap floor is the shared gate across v1/v2.
+        // Mic 0–1000 (1 s); system 700–10000 (9.3 s). Overlap = 300 ms
+        // / min(1000, 9300) = 300/1000 = 0.3 → below 0.5.
+        let micTokens = (1 ... 20).map { "tok\($0)" }
+        let systemTokens = (1 ... 20).map { "tok\($0)" } + (100 ... 200).map { "filler\($0)" }
+        let mics = [Self.mic(id: 1, start: 0, end: 1000, text: micTokens.joined(separator: " "))]
+        let systems = [Self.sys(id: 2, start: 700, end: 10000, text: systemTokens.joined(separator: " "))]
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v2)
+        #expect(pairs.isEmpty, "containment alone shouldn't flag; overlap floor still gates")
+    }
+
+    @Test func v2CarriesBothScoresInAudit() throws {
+        // Audit symmetry: v2 pairs record both containment (the
+        // decision) and jaccard (informational only). v1 pairs leave
+        // containment nil and record jaccard.
+        let micTokens = (1 ... 30).map { "tok\($0)" }
+        let systemTokens = (1 ... 30).map { "tok\($0)" }
+        let mics = [Self.mic(id: 1, start: 0, end: 2000, text: micTokens.joined(separator: " "))]
+        let systems = [Self.sys(id: 2, start: 0, end: 2000, text: systemTokens.joined(separator: " "))]
+        let pairs = SpeakerBleedDeduper.pairsToDedup(segments: mics + systems, version: .v2)
+        try #require(pairs.count == 1)
+        #expect(pairs.first?.containment == 1.0)
+        #expect(pairs.first?.jaccard == 1.0)
     }
 }

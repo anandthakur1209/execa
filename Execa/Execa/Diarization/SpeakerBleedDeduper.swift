@@ -46,6 +46,15 @@ enum SpeakerBleedDeduper {
     /// purpose. A value of 0.59 explicitly skips; 0.6 is the boundary.
     static let minConfidence: Double = 0.6
 
+    // MARK: - Thresholds (v2-specific)
+
+    /// Containment coefficient floor used by v2: `|mic ∩ system| /
+    /// |mic|`. Tighter than v1's jaccard 0.6 because containment is a
+    /// stricter measure when bleed is real — a mic fragment of a
+    /// longer system segment hits 1.0 containment but only 0.33
+    /// jaccard. 0.75 is the Phase 3.5b plan-locked default.
+    static let minContainment: Double = 0.75
+
     // MARK: - Types
 
     /// One mic-or-system segment as the deduper sees it. Built from
@@ -138,16 +147,117 @@ enum SpeakerBleedDeduper {
         }
     }
 
-    // MARK: - V2: placeholder (replaced in commit b)
+    // MARK: - V2: containment + stemming pairwise (commit b)
 
-    /// V2 placeholder. Commit (a) delegates to v1 so the test surface
-    /// stays stable while the dispatcher and audit-struct refactor
-    /// land. Commit (b) replaces the body with the
-    /// containment + Porter-light stemming pairwise core; commit (c)
-    /// adds the concatenation pre-pass; commit (d) adds the
-    /// cross-validation post-pass.
+    /// V2 pairwise core: same `isEligible` gate as v1 (duration ≥ 1 s,
+    /// confidence ≥ 0.6 or NULL, non-empty text) and same time-overlap
+    /// floor, but uses containment ≥ 0.75 over **stemmed** tokens
+    /// instead of jaccard. Each `DedupPair` carries both audit scores
+    /// (containment is the decision; jaccard is informational).
+    ///
+    /// Commit (c) wraps this with a concatenation pre-pass; commit (d)
+    /// appends a cross-validation post-pass.
     static func pairsToDedupV2(segments: [Segment]) -> [DedupPair] {
-        pairsToDedupV1(segments: segments)
+        let mics = segments.filter { $0.source == "mic" }
+        let systems = segments.filter { $0.source == "system" }
+        guard !mics.isEmpty, !systems.isEmpty else { return [] }
+        return mics.compactMap { mic in
+            guard isEligible(mic) else { return nil }
+            for system in systems {
+                guard isEligible(system) else { continue }
+                guard timeOverlapFraction(mic: mic, system: system) >= minOverlapFraction else {
+                    continue
+                }
+                let containment = containmentTextSimilarity(mic: mic.text, system: system.text)
+                guard containment >= minContainment else { continue }
+                let jaccard = jaccardTextSimilarity(mic.text, system.text)
+                return DedupPair(
+                    dedupedID: mic.id,
+                    againstID: system.id,
+                    containment: containment,
+                    jaccard: jaccard,
+                    promotionReason: .pairwise
+                )
+            }
+            return nil
+        }
+    }
+
+    /// Containment coefficient: `|mic_tokens ∩ system_tokens| /
+    /// |mic_tokens|`, computed over STEMMED tokens. Returns 0 if the
+    /// mic side tokenizes to empty (defensive — divide-by-zero would
+    /// otherwise NaN). Asymmetric by design: "what fraction of the
+    /// mic's vocabulary appears in the system's vocabulary." A mic
+    /// fragment of a larger system utterance hits 1.0; a paraphrase
+    /// with different word choice stays low.
+    static func containmentTextSimilarity(mic: String, system: String) -> Double {
+        let micTokens = Set(tokenList(mic))
+        let systemTokens = Set(tokenList(system))
+        guard !micTokens.isEmpty else { return 0 }
+        let intersectionCount = micTokens.intersection(systemTokens).count
+        return Double(intersectionCount) / Double(micTokens.count)
+    }
+
+    /// Ordered list of stemmed tokens. v2 uses this instead of the
+    /// `Set<String>`-returning `tokenize(_:)` because the concatenation
+    /// pre-pass (commit c) needs to preserve order before joining;
+    /// containment scoring builds sets at the call site. Stemming is
+    /// ASCII-only — see `stem(_:)`.
+    static func tokenList(_ text: String) -> [String] {
+        let lower = text.lowercased()
+        let separators = CharacterSet.alphanumerics.inverted
+        return lower
+            .components(separatedBy: separators)
+            .filter { !$0.isEmpty }
+            .map { stem($0) }
+    }
+
+    /// Porter-light suffix stripper, ASCII-only. Six rules applied in
+    /// precedence order; first match wins and the rule returns. Each
+    /// rule has a minimum-stem-length guard so common short words
+    /// (`his`, `was`, `yes`, `ring`, `fed`, `bed`) don't get
+    /// catastrophically over-stemmed. Devanagari and other non-ASCII
+    /// tokens pass through untouched — the gate is
+    /// `String.allSatisfy(\.isASCII)`.
+    ///
+    /// Rules and their min-stem floors (the length the token would be
+    /// AFTER applying the rule):
+    ///   1. "ies" → "y"  (min 3): "companies" → "company"
+    ///   2. "ied" → "y"  (min 3): "tried" → "try"
+    ///   3. "ing" → ""   (min 4): "training" → "train"; "ring" stays
+    ///   4. "ed"  → ""   (min 4): "trained" → "train"; "fed", "bed" stay
+    ///   5. "es"  → ""   (min 3): "boxes" → "box"
+    ///   6. "s"   → ""   (min 4): "scripts" → "script"; "his", "was" stay
+    static func stem(_ token: String) -> String {
+        guard token.allSatisfy(\.isASCII) else { return token }
+        let chars = Array(token)
+        let count = chars.count
+
+        // Rule 1: "ies" → "y", post-strip length ≥ 3 (so result ≥ 3 → input ≥ 5)
+        if count >= 5, chars.suffix(3) == ["i", "e", "s"] {
+            return String(chars.dropLast(3)) + "y"
+        }
+        // Rule 2: "ied" → "y", post-strip length ≥ 3 → input ≥ 5
+        if count >= 5, chars.suffix(3) == ["i", "e", "d"] {
+            return String(chars.dropLast(3)) + "y"
+        }
+        // Rule 3: "ing" → "", post-strip length ≥ 4 → input ≥ 7
+        if count >= 7, chars.suffix(3) == ["i", "n", "g"] {
+            return String(chars.dropLast(3))
+        }
+        // Rule 4: "ed" → "", post-strip length ≥ 4 → input ≥ 6
+        if count >= 6, chars.suffix(2) == ["e", "d"] {
+            return String(chars.dropLast(2))
+        }
+        // Rule 5: "es" → "", post-strip length ≥ 3 → input ≥ 5
+        if count >= 5, chars.suffix(2) == ["e", "s"] {
+            return String(chars.dropLast(2))
+        }
+        // Rule 6: "s" → "", post-strip length ≥ 4 → input ≥ 5
+        if count >= 5, chars.last == "s" {
+            return String(chars.dropLast(1))
+        }
+        return token
     }
 
     // MARK: - Eligibility + V1 matching
@@ -252,60 +362,5 @@ enum SpeakerBleedDeduper {
     }
 }
 
-// MARK: - Algorithm version
-
-/// Selects which dedup algorithm runs. Phase 3.5 shipped v1 (Jaccard
-/// 0.6); Phase 3.5b ships v2 (containment 0.75 + Porter-light stemming
-/// + concatenation pre-pass + cross-validation post-pass). v1 is
-/// retained as a flag-fallback for A/B regression if v2 over-dedupes
-/// in real meetings.
-enum BleedDedupAlgorithmVersion: String, Equatable {
-    case v1
-    case v2
-}
-
-// MARK: - DedupPair + DedupResult
-
-/// Why a segment was flagged as bleed. Carried in `DedupPair` for
-/// in-memory audit only; the DB persists just the `deduped_against_
-/// segment_id` FK. Lets the manual-smoke story explain which v2 pass
-/// flagged each segment when debugging.
-enum PromotionReason: Equatable {
-    /// Flagged by the pairwise pass (v1 or v2) — single mic segment
-    /// matched against a single system segment.
-    case pairwise
-    /// Flagged by v2's concatenation pre-pass — multiple consecutive
-    /// same-speaker mic segments compared as one joined string
-    /// against one containing system segment.
-    case concatenation
-    /// Flagged by v2's cross-validation post-pass — a speaker-level
-    /// promotion that fires when ≥80% of a mic speaker's segments
-    /// (and ≥3 in absolute count) were already flagged by the
-    /// pairwise/concatenation passes.
-    case speakerPromotion
-}
-
-/// One flag in a dedup pass: a mic-side segment soft-deleted against
-/// a surviving system-side segment, with audit metadata. `containment`
-/// and `jaccard` are nil when the score isn't applicable to this
-/// flag's reason (e.g. speaker-promotion pairs don't go through
-/// pairwise scoring).
-struct DedupPair: Equatable {
-    let dedupedID: Int64
-    let againstID: Int64
-    let containment: Double?
-    let jaccard: Double?
-    let promotionReason: PromotionReason
-}
-
-/// Result of one dedup pass. `pairs` is the primary field carrying
-/// audit metadata for each soft-delete; `dedupedPairs` is a computed
-/// `[(Int64, Int64)]` projection for backward compat with code that
-/// only needs the ID pairs (existing tests pre-Phase-3.5b).
-struct DedupResult: Equatable {
-    let pairs: [DedupPair]
-
-    var dedupedPairs: [(Int64, Int64)] {
-        pairs.map { ($0.dedupedID, $0.againstID) }
-    }
-}
+// `BleedDedupAlgorithmVersion`, `PromotionReason`, `DedupPair`, and
+// `DedupResult` are defined in SpeakerBleedDedupTypes.swift.

@@ -85,14 +85,14 @@ struct SettingsStore {
     }
 
     /// Reads the `bleed_dedup_algorithm_version` setting; defaults to
-    /// `.v1` in Phase 3.5b commit (a) (algorithm-version plumbing only;
-    /// behavior unchanged from Phase 3.5). Commit (b) flips the
-    /// default to `.v2` once the v2 algorithm core lands. Unknown
-    /// strings fall back to the default to defend against typos when
-    /// the user edits the row directly.
+    /// `.v2` (Phase 3.5b — containment + Porter-light stemming). v1 is
+    /// retained as a flag-fallback so users can revert with a direct
+    /// DB edit if v2 over-dedupes in real meetings. Unknown strings
+    /// fall back to the default to defend against typos when the user
+    /// edits the row directly.
     func bleedDedupAlgorithmVersion() async throws -> BleedDedupAlgorithmVersion {
         let raw = try await string(forKey: .bleedDedupAlgorithmVersion)
-        guard let raw else { return .v1 }
-        return BleedDedupAlgorithmVersion(rawValue: raw) ?? .v1
+        guard let raw else { return .v2 }
+        return BleedDedupAlgorithmVersion(rawValue: raw) ?? .v2
     }
 }
