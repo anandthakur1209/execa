@@ -8,7 +8,9 @@ The full specification is in `meeting-app-spec.md`; locked-in architectural deci
 
 ## Current status
 
-**Phase 3.5 complete (tagged `phase-3.5`). Ready for Phase 4.** Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 3.5 are landed end-to-end. On top of Phase 3's batch diarization, Phase 3.5 adds the post-batch speaker-bleed dedup pass: when the user runs a meeting on built-in speakers (no headphones), the laptop's speakers play remote audio into the room and the mic re-captures it; the same remote voice gets transcribed both as a system-side `Speaker N` AND a mic-side `In-room N+1`. The dedup pass identifies mic-side segments mirroring system-side segments in time AND text and soft-deletes them via the new `transcript_segments.deduped_against_segment_id` column (v4 migration). Algorithm: ≥50% time overlap (relative to the shorter side) AND ≥0.6 jaccard text similarity (lowercased + unicode-tokenized); skip pairs with sub-1 s duration or sub-0.6 confidence on either side. Direction is one-way (mic flagged as bleed of system). View layer (`SpeakerSidebar` + `MeetingDetailView`) calls `SpeakerQueries.visibleSpeakers` to filter out orphan mic speakers; `talkTimeAggregated` excludes deduped duration. Settings flag `auto_speaker_bleed_dedup` (default `true`) gates the pass; manual smoke disable + Re-run is the recovery path for the rare device-owner-repeats-system edge case. Two-write design (swap then dedup in separate writes) is intentional — testability + maintainability over an atomic transaction.
+**Phase 3.5b complete (tagged `phase-3.5b`). Ready for Phase 4.** Phase 3.5 manual smoke surfaced an algorithmic weakness: Jaccard similarity over raw tokens fails on the most common bleed pattern (mic captures a fragment of a longer system segment — containment is high but Jaccard is low). Phase 3.5b ships a v2 algorithm under a new `bleed_dedup_algorithm_version` settings key (default `"v2"`, v1 retained as flag-fallback): containment coefficient (`|mic ∩ system| / |mic|`) ≥ 0.75 over Porter-light-stemmed tokens; ASCII-only stemmer (Devanagari pass-through); concatenation pre-pass that scores consecutive same-speaker mic fragments inside one containing system segment as one unit; cross-validation post-pass that promotes the remaining unflagged segments of any mic speaker who's already ≥ 80% flagged with ≥ 3 absolute flagged segments. The Phase 3.5 design (soft-delete via `transcript_segments.deduped_against_segment_id`, view-layer orphan-speaker filter via `SpeakerQueries.visibleSpeakers`, two-write swap-then-dedup pattern) is unchanged — v2 swaps only the scoring function and adds two passes.
+
+**Phase 3.5 (foundation, still Active):** Post-batch speaker-bleed dedup pass — when the user runs a meeting on built-in speakers (no headphones), the laptop's speakers play remote audio into the room and the mic re-captures it; the same remote voice gets transcribed both as a system-side `Speaker N` AND a mic-side `In-room N+1`. Dedup pass identifies mic-side segments mirroring system-side segments in time AND text and soft-deletes them via the `transcript_segments.deduped_against_segment_id` column (v4 migration). v1's Jaccard 0.6 scoring is now superseded by v2's containment 0.75 (above); the soft-delete + view-filter design carries forward unchanged. Direction is one-way (mic flagged as bleed of system). Settings: `auto_speaker_bleed_dedup` (default `true`) gates the pass; `bleed_dedup_algorithm_version` (default `"v2"`) picks the algorithm. Two-write design (swap then dedup in separate writes) is intentional — testability + maintainability over an atomic transaction.
 
 Phase 3's foundation: post-meeting Sarvam batch diarization pipeline runs automatically at `stopMeeting` (gated by the `auto_diarization` setting, default-on), submitting `mic.wav` and `system.wav` as two parallel jobs to the Sarvam batch v1 endpoint with authoritative-replace swap into the DB; `SpeakerSidebar` (live) + `MeetingDetailView` (post-meeting) host rename / cross-source merge / right-click split; voice-sample playback walks the merge alias per Revision 5; "Open last meeting" menu-bar item reaches the detail window without a TTL.
 
@@ -128,6 +130,29 @@ Phase 2's known issue (Resume after bad-key replacement requires app relaunch) c
 - Re-run diarization re-applies dedup against the freshly-swapped state.
 - Back-to-back meetings each dedup independently per `meeting_id` (the "do it twice" gate from Phase 2's lessons-learned).
 - Phase-3-era meetings on disk render unchanged after v4 migration (column is NULL → filter is a no-op).
+
+---
+
+## Phase 3.5b — Bleed dedup algorithm v2
+
+**Goal:** Phase 3.5's Jaccard-based dedup fails on the most common bleed pattern: when the mic captures a fragment of a longer system segment, the |intersection| / |union| ratio falls below threshold and dedup correctly skips per the rule but leaves visible duplicates. Phase 3.5b replaces Jaccard with containment, adds token stemming, and adds two structural passes (concatenation pre-pass + cross-validation post-pass) to catch fragment patterns and whole-speaker bleed.
+
+**Scope:**
+- `bleed_dedup_algorithm_version` settings key, default `"v2"`; v1 retained as flag-fallback for A/B regression.
+- v2 pairwise core: same eligibility + time-overlap gate as v1, but uses containment ≥ 0.75 over Porter-light-stemmed tokens.
+- Porter-light stemmer: six rules (ies→y, ied→y, ing→, ed→, es→, s→) with min-input-length guards; ASCII-only (Devanagari and other non-ASCII tokens pass through untouched).
+- Concatenation pre-pass: groups consecutive same-speaker mic segments that fall entirely within one system segment's time window; joins their text and scores the joined string as one unit. Catches "mic captured several short fragments of one long system utterance."
+- Cross-validation post-pass: when ≥ 80% of a mic speaker's segments are flagged AND ≥ 3 in absolute count, promote the remaining unflagged segments to flagged. Audit FK on promoted rows points at the nearest-neighbor system segment by `startMs` within the most-frequent target system speaker. Catches "whole mic speaker is just bleed echo."
+- `DedupPair` audit struct gains `containment`, `jaccard`, and `promotionReason` (`.pairwise` / `.concatenation` / `.speakerPromotion`) for in-memory debugging; only the FK is persisted.
+- v2 code lives in `SpeakerBleedDedupV2.swift` as an extension on `SpeakerBleedDeduper`; v1 path in `SpeakerBleedDeduper.swift` is fully unchanged.
+
+**Acceptance:**
+- Regression test: 30-token mic ⊂ 90-token system at 90% overlap. v1 does NOT flag (jaccard 0.33); v2 DOES flag (containment 1.0). Both pinned forever.
+- Paraphrase guard survives v2: legitimately different word choice at high overlap stays not-flagged.
+- Concat pre-pass flags multi-fragment mic capture inside one system segment; alternating speakers + sub-1 s totals + low-confidence groups + multi-system spans correctly skipped.
+- Cross-validation promotes 4-of-5 mic-speaker pattern; 2-of-5 / 3-of-4 / 2-segment-with-2-flagged correctly NOT promoted; nearest-neighbor audit FK and lowest-id tie-break deterministic.
+- v1 flag-fallback: `UPDATE settings SET value='v1' ...` + Re-run reverts to Phase 3.5 behavior.
+- Phase-3.5-era meetings on disk render correctly under v2 default (existing audit FKs respected; new dedup runs apply v2 on Re-run).
 
 ---
 
