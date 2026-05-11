@@ -174,6 +174,48 @@ struct SpeakerBleedDedupIntegrationTests {
         #expect(visibleSpeakers.first?.source == "system",
                 "only system-side speaker should be visible after dedup")
     }
+
+    @Test func v2ConcatenationPrePassFlagsFragmentsEndToEnd() async throws {
+        // Phase 3.5b commit (c) end-to-end: mic produces three short
+        // fragments inside one long system utterance. Each fragment
+        // is individually below containment threshold; the concat
+        // pre-pass joins them and flags all three. Verifies the
+        // algorithm wires through to the DB audit column under v2.
+        let env = try await DiarizationTestEnv.make(displayName: "Anand")
+        try await env.seedStreaming(source: "mic", rawSpeakerID: 0, label: "Anand", text: "stream-mic")
+        try await env.seedStreaming(source: "system", rawSpeakerID: 0, label: "Remote", text: "stream-system")
+
+        await env.run(
+            mic: .success(SarvamBatchResult(segments: [
+                .init(speakerID: 0, startMs: 500, endMs: 1100,
+                      text: "alpha beta gamma", languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 1500, endMs: 2100,
+                      text: "delta epsilon zeta", languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 2500, endMs: 3100,
+                      text: "eta theta iota", languageCode: "en-IN")
+            ])),
+            system: .success(SarvamBatchResult(segments: [
+                .init(speakerID: 0, startMs: 0, endMs: 5000,
+                      text: "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+                      languageCode: "en-IN")
+            ]))
+        )
+
+        let segments = try await env.allSegmentsWithDedupAudit()
+        let micSegments = segments.filter { $0.source == "mic" }
+        try #require(micSegments.count == 3, "three mic fragments persisted")
+        for segment in micSegments {
+            #expect(segment.dedupedAgainstSegmentID != nil,
+                    "concat pre-pass should flag every fragment")
+        }
+        // System-side stays visible.
+        let systemSegments = segments.filter { $0.source == "system" }
+        #expect(systemSegments.first?.dedupedAgainstSegmentID == nil)
+        // Sidebar filters out the orphan mic speaker.
+        let visibleSpeakers = try await env.visibleSpeakerSummaries()
+        #expect(visibleSpeakers.count == 1)
+        #expect(visibleSpeakers.first?.source == "system")
+    }
 }
 
 // MARK: - Test env extensions

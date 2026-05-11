@@ -350,4 +350,8 @@ struct SpeakerBleedDeduperTests {
         #expect(pairs.first?.containment == 1.0)
         #expect(pairs.first?.jaccard == 1.0)
     }
+
+    // V2 concatenation pre-pass tests live in
+    // `SpeakerBleedDedupV2ConcatenationTests.swift` to keep this file
+    // under the type/file-length caps.
 }

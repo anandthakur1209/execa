@@ -147,124 +147,19 @@ enum SpeakerBleedDeduper {
         }
     }
 
-    // MARK: - V2: containment + stemming pairwise (commit b)
-
-    /// V2 pairwise core: same `isEligible` gate as v1 (duration ≥ 1 s,
-    /// confidence ≥ 0.6 or NULL, non-empty text) and same time-overlap
-    /// floor, but uses containment ≥ 0.75 over **stemmed** tokens
-    /// instead of jaccard. Each `DedupPair` carries both audit scores
-    /// (containment is the decision; jaccard is informational).
-    ///
-    /// Commit (c) wraps this with a concatenation pre-pass; commit (d)
-    /// appends a cross-validation post-pass.
-    static func pairsToDedupV2(segments: [Segment]) -> [DedupPair] {
-        let mics = segments.filter { $0.source == "mic" }
-        let systems = segments.filter { $0.source == "system" }
-        guard !mics.isEmpty, !systems.isEmpty else { return [] }
-        return mics.compactMap { mic in
-            guard isEligible(mic) else { return nil }
-            for system in systems {
-                guard isEligible(system) else { continue }
-                guard timeOverlapFraction(mic: mic, system: system) >= minOverlapFraction else {
-                    continue
-                }
-                let containment = containmentTextSimilarity(mic: mic.text, system: system.text)
-                guard containment >= minContainment else { continue }
-                let jaccard = jaccardTextSimilarity(mic.text, system.text)
-                return DedupPair(
-                    dedupedID: mic.id,
-                    againstID: system.id,
-                    containment: containment,
-                    jaccard: jaccard,
-                    promotionReason: .pairwise
-                )
-            }
-            return nil
-        }
-    }
-
-    /// Containment coefficient: `|mic_tokens ∩ system_tokens| /
-    /// |mic_tokens|`, computed over STEMMED tokens. Returns 0 if the
-    /// mic side tokenizes to empty (defensive — divide-by-zero would
-    /// otherwise NaN). Asymmetric by design: "what fraction of the
-    /// mic's vocabulary appears in the system's vocabulary." A mic
-    /// fragment of a larger system utterance hits 1.0; a paraphrase
-    /// with different word choice stays low.
-    static func containmentTextSimilarity(mic: String, system: String) -> Double {
-        let micTokens = Set(tokenList(mic))
-        let systemTokens = Set(tokenList(system))
-        guard !micTokens.isEmpty else { return 0 }
-        let intersectionCount = micTokens.intersection(systemTokens).count
-        return Double(intersectionCount) / Double(micTokens.count)
-    }
-
-    /// Ordered list of stemmed tokens. v2 uses this instead of the
-    /// `Set<String>`-returning `tokenize(_:)` because the concatenation
-    /// pre-pass (commit c) needs to preserve order before joining;
-    /// containment scoring builds sets at the call site. Stemming is
-    /// ASCII-only — see `stem(_:)`.
-    static func tokenList(_ text: String) -> [String] {
-        let lower = text.lowercased()
-        let separators = CharacterSet.alphanumerics.inverted
-        return lower
-            .components(separatedBy: separators)
-            .filter { !$0.isEmpty }
-            .map { stem($0) }
-    }
-
-    /// Porter-light suffix stripper, ASCII-only. Six rules applied in
-    /// precedence order; first match wins and the rule returns. Each
-    /// rule has a minimum-stem-length guard so common short words
-    /// (`his`, `was`, `yes`, `ring`, `fed`, `bed`) don't get
-    /// catastrophically over-stemmed. Devanagari and other non-ASCII
-    /// tokens pass through untouched — the gate is
-    /// `String.allSatisfy(\.isASCII)`.
-    ///
-    /// Rules and their min-stem floors (the length the token would be
-    /// AFTER applying the rule):
-    ///   1. "ies" → "y"  (min 3): "companies" → "company"
-    ///   2. "ied" → "y"  (min 3): "tried" → "try"
-    ///   3. "ing" → ""   (min 4): "training" → "train"; "ring" stays
-    ///   4. "ed"  → ""   (min 4): "trained" → "train"; "fed", "bed" stay
-    ///   5. "es"  → ""   (min 3): "boxes" → "box"
-    ///   6. "s"   → ""   (min 4): "scripts" → "script"; "his", "was" stay
-    static func stem(_ token: String) -> String {
-        guard token.allSatisfy(\.isASCII) else { return token }
-        let chars = Array(token)
-        let count = chars.count
-
-        // Rule 1: "ies" → "y", post-strip length ≥ 3 (so result ≥ 3 → input ≥ 5)
-        if count >= 5, chars.suffix(3) == ["i", "e", "s"] {
-            return String(chars.dropLast(3)) + "y"
-        }
-        // Rule 2: "ied" → "y", post-strip length ≥ 3 → input ≥ 5
-        if count >= 5, chars.suffix(3) == ["i", "e", "d"] {
-            return String(chars.dropLast(3)) + "y"
-        }
-        // Rule 3: "ing" → "", post-strip length ≥ 4 → input ≥ 7
-        if count >= 7, chars.suffix(3) == ["i", "n", "g"] {
-            return String(chars.dropLast(3))
-        }
-        // Rule 4: "ed" → "", post-strip length ≥ 4 → input ≥ 6
-        if count >= 6, chars.suffix(2) == ["e", "d"] {
-            return String(chars.dropLast(2))
-        }
-        // Rule 5: "es" → "", post-strip length ≥ 3 → input ≥ 5
-        if count >= 5, chars.suffix(2) == ["e", "s"] {
-            return String(chars.dropLast(2))
-        }
-        // Rule 6: "s" → "", post-strip length ≥ 4 → input ≥ 5
-        if count >= 5, chars.last == "s" {
-            return String(chars.dropLast(1))
-        }
-        return token
-    }
+    // V2 algorithm + helpers live in SpeakerBleedDedupV2.swift as an
+    // extension on this enum. Keeps the main file under the cap and
+    // groups all v2-specific surface area in one place for future
+    // maintainers.
 
     // MARK: - Eligibility + V1 matching
 
     /// True iff the segment passes the duration / confidence / non-
     /// empty-text gate that applies to BOTH sides of a candidate pair.
-    private static func isEligible(_ segment: Segment) -> Bool {
+    /// Default-internal so the v2 extension in
+    /// `SpeakerBleedDedupV2.swift` can reach it; the gate is shared
+    /// across versions, so single-source-of-truth wins over privacy.
+    static func isEligible(_ segment: Segment) -> Bool {
         guard segment.durationMs >= minSegmentDurationMs else { return false }
         if let conf = segment.confidence, conf < minConfidence { return false }
         return !segment.text.isEmpty
