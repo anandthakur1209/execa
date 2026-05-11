@@ -32,7 +32,13 @@ extension SpeakerBleedDeduper {
             systems: systems,
             excluding: prePassFlagged
         )
-        return prePassPairs + pairwisePairs
+        let initialPairs = prePassPairs + pairwisePairs
+        let promotedPairs = applySpeakerLevelPromotion(
+            pairs: initialPairs,
+            mics: mics,
+            systems: systems
+        )
+        return initialPairs + promotedPairs
     }
 
     /// V2 pairwise core: same gate as v1 but uses containment ≥ 0.75
@@ -171,6 +177,109 @@ extension SpeakerBleedDeduper {
             // Higher durationMs wins; on tie, LOWER id wins (so we
             // invert the id comparison to make `max` return lowest).
             return lhs.id > rhs.id
+        }
+    }
+
+    // MARK: - Cross-validation post-pass (commit d)
+
+    /// Speaker-level promotion: for each mic speaker, if ≥
+    /// `crossValidationFlagRatio` of their segments are already
+    /// flagged AND ≥ `crossValidationMinFlagged` are flagged in
+    /// absolute count, promote the speaker's remaining unflagged
+    /// segments to flagged. Pointed at the system speaker most
+    /// frequently named in the already-flagged pairs (with
+    /// deterministic tie-breaks). PromotionReason: .speakerPromotion;
+    /// audit scores `nil` (these pairs didn't go through pairwise
+    /// scoring).
+    static func applySpeakerLevelPromotion(
+        pairs: [DedupPair],
+        mics: [Segment],
+        systems: [Segment]
+    ) -> [DedupPair] {
+        guard !pairs.isEmpty, !mics.isEmpty, !systems.isEmpty else { return [] }
+        let micsBySpeaker = Dictionary(grouping: mics, by: \.speakerID)
+        let systemsByID = Dictionary(uniqueKeysWithValues: systems.map { ($0.id, $0) })
+        let systemSpeakerByID = Dictionary(uniqueKeysWithValues: systems.map { ($0.id, $0.speakerID) })
+        let flaggedSegmentIDs = Set(pairs.map(\.dedupedID))
+        let pairsByMicSegment = Dictionary(uniqueKeysWithValues: pairs.map { ($0.dedupedID, $0) })
+        var promoted: [DedupPair] = []
+        for (micSpeakerID, segments) in micsBySpeaker {
+            let total = segments.count
+            let flaggedSegments = segments.filter { flaggedSegmentIDs.contains($0.id) }
+            let flaggedCount = flaggedSegments.count
+            guard flaggedCount >= crossValidationMinFlagged else { continue }
+            let ratio = Double(flaggedCount) / Double(total)
+            guard ratio >= crossValidationFlagRatio else { continue }
+            guard let targetSystemSpeakerID = chooseTargetSystemSpeaker(
+                flaggedSegments: flaggedSegments,
+                pairsByMicSegment: pairsByMicSegment,
+                systemSpeakerByID: systemSpeakerByID
+            ) else { continue }
+            let targetSystemSegments = systems
+                .filter { $0.speakerID == targetSystemSpeakerID }
+                .sorted { $0.startMs < $1.startMs }
+            guard !targetSystemSegments.isEmpty else { continue }
+            for segment in segments where !flaggedSegmentIDs.contains(segment.id) {
+                guard let neighborSystem = nearestNeighborSystem(
+                    micStart: segment.startMs,
+                    targetSystems: targetSystemSegments
+                ) else { continue }
+                _ = micSpeakerID // silence unused-let; the grouping is the point
+                _ = systemsByID // retained for symmetry with future lookups
+                promoted.append(DedupPair(
+                    dedupedID: segment.id,
+                    againstID: neighborSystem.id,
+                    containment: nil,
+                    jaccard: nil,
+                    promotionReason: .speakerPromotion
+                ))
+            }
+        }
+        return promoted
+    }
+
+    /// Picks the system speaker most frequently named as "against" in
+    /// the flagged mic segments. Tie-break order:
+    ///   1. Highest count (most-frequent system speaker wins).
+    ///   2. Tie → highest cumulative containment across those flagged
+    ///      pairs.
+    ///   3. Still tied → lowest `speakers.id` (deterministic).
+    private static func chooseTargetSystemSpeaker(
+        flaggedSegments: [Segment],
+        pairsByMicSegment: [Int64: DedupPair],
+        systemSpeakerByID: [Int64: Int64]
+    ) -> Int64? {
+        var countBySystemSpeaker: [Int64: Int] = [:]
+        var containmentSumBySystemSpeaker: [Int64: Double] = [:]
+        for segment in flaggedSegments {
+            guard let pair = pairsByMicSegment[segment.id] else { continue }
+            guard let systemSpeaker = systemSpeakerByID[pair.againstID] else { continue }
+            countBySystemSpeaker[systemSpeaker, default: 0] += 1
+            containmentSumBySystemSpeaker[systemSpeaker, default: 0] += pair.containment ?? 0
+        }
+        return countBySystemSpeaker
+            .max { lhs, rhs in
+                if lhs.value != rhs.value { return lhs.value < rhs.value }
+                let lhsSum = containmentSumBySystemSpeaker[lhs.key] ?? 0
+                let rhsSum = containmentSumBySystemSpeaker[rhs.key] ?? 0
+                if lhsSum != rhsSum { return lhsSum < rhsSum }
+                return lhs.key > rhs.key // invert: lowest id wins
+            }?
+            .key
+    }
+
+    /// For a promoted (unflagged) mic segment, pick the
+    /// nearest-neighbor system segment by `startMs` to populate the
+    /// audit FK. Best-effort: speaker-level promotion already
+    /// decided this whole mic speaker is bleed; the FK is just an
+    /// audit pointer, not a precise time-overlap match.
+    private static func nearestNeighborSystem(
+        micStart: Int,
+        targetSystems: [Segment]
+    ) -> Segment? {
+        guard !targetSystems.isEmpty else { return nil }
+        return targetSystems.min { lhs, rhs in
+            abs(lhs.startMs - micStart) < abs(rhs.startMs - micStart)
         }
     }
 

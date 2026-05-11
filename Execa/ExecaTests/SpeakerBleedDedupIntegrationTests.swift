@@ -175,6 +175,47 @@ struct SpeakerBleedDedupIntegrationTests {
                 "only system-side speaker should be visible after dedup")
     }
 
+    @Test func v2CrossValidationPromotionFlagsRemainingSegmentEndToEnd() async throws {
+        // Phase 3.5b commit (d) end-to-end: 4 of 5 mic-speaker
+        // segments flag pairwise; the 5th has unrelated text but
+        // gets promoted by cross-validation (ratio 0.8 ≥ 0.8,
+        // count 4 ≥ 3). Audit FK on the promoted row points at the
+        // nearest-neighbor system segment within the target system
+        // speaker.
+        let env = try await DiarizationTestEnv.make(displayName: "Anand")
+        try await env.seedStreaming(source: "mic", rawSpeakerID: 0, label: "Anand", text: "stream-mic")
+        try await env.seedStreaming(source: "system", rawSpeakerID: 0, label: "Remote", text: "stream-system")
+        let sharedTokens = (1 ... 10).map { "tok\($0)" }.joined(separator: " ")
+        await env.run(
+            mic: .success(SarvamBatchResult(segments: [
+                .init(speakerID: 0, startMs: 0, endMs: 1500, text: sharedTokens, languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 2000, endMs: 3500, text: sharedTokens, languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 4000, endMs: 5500, text: sharedTokens, languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 6000, endMs: 7500, text: sharedTokens, languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 20000, endMs: 21000,
+                      text: "unrelated promoted text bleed", languageCode: "en-IN")
+            ])),
+            system: .success(SarvamBatchResult(segments: [
+                .init(speakerID: 0, startMs: 0, endMs: 1500, text: sharedTokens, languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 2000, endMs: 3500, text: sharedTokens, languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 4000, endMs: 5500, text: sharedTokens, languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 6000, endMs: 7500, text: sharedTokens, languageCode: "en-IN"),
+                .init(speakerID: 0, startMs: 19000, endMs: 22000, text: sharedTokens, languageCode: "en-IN")
+            ]))
+        )
+
+        let segments = try await env.allSegmentsWithDedupAudit()
+        let micSegments = segments.filter { $0.source == "mic" }
+        try #require(micSegments.count == 5)
+        for segment in micSegments {
+            #expect(segment.dedupedAgainstSegmentID != nil,
+                    "all 5 mic segments should be flagged (4 pairwise + 1 promoted)")
+        }
+        let visibleSpeakers = try await env.visibleSpeakerSummaries()
+        #expect(visibleSpeakers.count == 1)
+        #expect(visibleSpeakers.first?.source == "system")
+    }
+
     @Test func v2ConcatenationPrePassFlagsFragmentsEndToEnd() async throws {
         // Phase 3.5b commit (c) end-to-end: mic produces three short
         // fragments inside one long system utterance. Each fragment

@@ -55,6 +55,22 @@ enum SpeakerBleedDeduper {
     /// jaccard. 0.75 is the Phase 3.5b plan-locked default.
     static let minContainment: Double = 0.75
 
+    /// Fraction of a mic speaker's segments that must be flagged by
+    /// pairwise + concatenation before the cross-validation post-pass
+    /// promotes the speaker's remaining unflagged segments. 80% is the
+    /// Phase 3.5b plan-locked default. Paired with
+    /// `crossValidationMinFlagged` to defend against false promotion
+    /// on speakers with very few segments.
+    static let crossValidationFlagRatio: Double = 0.8
+
+    /// Minimum absolute number of flagged segments required for the
+    /// cross-validation post-pass to fire. 3 protects 1- and 2-
+    /// segment mic speakers from being whole-promoted on insufficient
+    /// evidence (a single-segment speaker would always hit 100% flag
+    /// ratio after one pairwise match, but one match isn't enough
+    /// to conclude "whole speaker is bleed").
+    static let crossValidationMinFlagged: Int = 3
+
     // MARK: - Types
 
     /// One mic-or-system segment as the deduper sees it. Built from
