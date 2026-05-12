@@ -76,12 +76,18 @@ enum SpeakerBleedDeduper {
     /// One mic-or-system segment as the deduper sees it. Built from
     /// `transcript_segments` rows for one meeting. The `id` is the
     /// `transcript_segments.id` (used to write
-    /// `deduped_against_segment_id`); `speakerID` is the
-    /// `speakers.id` (used by view-layer filters when listing
-    /// orphan speakers and by the v2 cross-validation post-pass).
+    /// `deduped_against_segment_id`); `speakerID` is the raw
+    /// `speakers.id` (the FK target on `transcript_segments.speaker_id`);
+    /// `effectiveSpeakerID` is the post-merge canonical speaker —
+    /// equal to `speakerID` for un-merged rows, equal to
+    /// `merged_into_speaker_id` for rows merged into another speaker
+    /// (Phase 3.5c merge-aware grouping). Single-hop alias resolution
+    /// matches `SpeakerQueries.visibleSpeakers`; multi-hop chains
+    /// (A→B→C) are deliberately not flattened here.
     struct Segment: Equatable {
         let id: Int64
         let speakerID: Int64
+        let effectiveSpeakerID: Int64
         let source: String
         let startMs: Int
         let endMs: Int
@@ -105,6 +111,22 @@ enum SpeakerBleedDeduper {
         version: BleedDedupAlgorithmVersion,
         in db: GRDB.Database
     ) throws -> DedupResult {
+        // Reset-first idempotency (Phase 3.5c). Every call re-derives
+        // dedup state from scratch against the CURRENT speaker
+        // topology + segment text. At swap time this is a no-op
+        // because the swap deletes + re-inserts segments so their
+        // `deduped_against_segment_id` is already NULL; on a merge /
+        // split-triggered re-run, the wipe clears the stale FKs so
+        // the re-derivation against the new effective topology is
+        // clean. Documented in DECISIONS 2026-05-12 Phase 3.5c entry.
+        try db.execute(
+            sql: """
+            UPDATE transcript_segments
+            SET deduped_against_segment_id = NULL
+            WHERE meeting_id = ?
+            """,
+            arguments: [meetingID]
+        )
         let segments = try loadSegments(meetingID: meetingID, in: db)
         let pairs = pairsToDedup(segments: segments, version: version)
         for pair in pairs {
@@ -239,22 +261,36 @@ enum SpeakerBleedDeduper {
 
     // MARK: - DB loading
 
+    /// Loads every final segment for the meeting, joined to its
+    /// speaker row so we get `source` + the post-merge canonical
+    /// speaker via `COALESCE(merged_into_speaker_id, speakers.id)`.
+    /// Does NOT filter on `deduped_against_segment_id` — `dedup` has
+    /// already reset that column to NULL for the meeting. Single-hop
+    /// alias resolution matches `SpeakerQueries.visibleSpeakers`;
+    /// multi-hop chains (A→B→C) are an accepted edge case (Phase 3.5c
+    /// DECISIONS entry).
     private static func loadSegments(meetingID: String, in db: GRDB.Database) throws -> [Segment] {
         let rows = try Row.fetchAll(
             db,
             sql: """
-            SELECT id, speaker_id, start_ms, end_ms, text, confidence,
-                   (SELECT source FROM speakers WHERE speakers.id = transcript_segments.speaker_id) AS source
-            FROM transcript_segments
-            WHERE meeting_id = ?
-              AND is_final = 1
-              AND deduped_against_segment_id IS NULL
+            SELECT t.id AS id,
+                   t.speaker_id AS speaker_id,
+                   t.start_ms AS start_ms,
+                   t.end_ms AS end_ms,
+                   t.text AS text,
+                   t.confidence AS confidence,
+                   s.source AS source,
+                   COALESCE(s.merged_into_speaker_id, s.id) AS effective_speaker_id
+            FROM transcript_segments t
+            JOIN speakers s ON s.id = t.speaker_id
+            WHERE t.meeting_id = ? AND t.is_final = 1
             """,
             arguments: [meetingID]
         )
         return rows.compactMap { row -> Segment? in
             guard let id: Int64 = row["id"],
                   let speakerID: Int64 = row["speaker_id"],
+                  let effectiveSpeakerID: Int64 = row["effective_speaker_id"],
                   let source: String = row["source"],
                   let startMs: Int = row["start_ms"],
                   let endMs: Int = row["end_ms"],
@@ -263,6 +299,7 @@ enum SpeakerBleedDeduper {
             return Segment(
                 id: id,
                 speakerID: speakerID,
+                effectiveSpeakerID: effectiveSpeakerID,
                 source: source,
                 startMs: startMs,
                 endMs: endMs,

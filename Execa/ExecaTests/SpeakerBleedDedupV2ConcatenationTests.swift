@@ -15,7 +15,7 @@ struct SpeakerBleedDedupV2ConcatenationTests {
         speakerID: Int64 = 100,
         confidence: Double? = nil
     ) -> SpeakerBleedDeduper.Segment {
-        .init(id: id, speakerID: speakerID, source: "mic",
+        .init(id: id, speakerID: speakerID, effectiveSpeakerID: speakerID, source: "mic",
               startMs: start, endMs: end, text: text, confidence: confidence)
     }
 
@@ -24,9 +24,10 @@ struct SpeakerBleedDedupV2ConcatenationTests {
         start: Int,
         end: Int,
         text: String,
-        confidence: Double? = nil
+        confidence: Double? = nil,
+        effectiveSpeakerID: Int64 = 200
     ) -> SpeakerBleedDeduper.Segment {
-        .init(id: id, speakerID: 200, source: "system",
+        .init(id: id, speakerID: 200, effectiveSpeakerID: effectiveSpeakerID, source: "system",
               startMs: start, endMs: end, text: text, confidence: confidence)
     }
 
@@ -98,14 +99,21 @@ struct SpeakerBleedDedupV2ConcatenationTests {
     }
 
     @Test func concatenationGroupSpansMultipleSystemsSkipped() {
-        // Group spans 0–3000; no single system entirely contains it.
+        // Group spans 0–3000; the two system segments belong to
+        // DISTINCT effective speakers (200 vs 201) so neither
+        // effective speaker's combined time window contains the
+        // group. Phase 3.5c: pre-pass groups by effective speaker,
+        // so giving the systems different effective speaker IDs is
+        // what makes this test exercise the "spans multiple
+        // speakers" intent rather than accidentally testing
+        // "spans multiple raw segments of one speaker."
         let mics = [
             Self.mic(id: 1, start: 0, end: 600, text: "alpha beta"),
             Self.mic(id: 2, start: 2000, end: 3000, text: "gamma delta")
         ]
         let systems = [
-            Self.sys(id: 99, start: 0, end: 1500, text: "alpha beta"),
-            Self.sys(id: 100, start: 1500, end: 3000, text: "gamma delta")
+            Self.sys(id: 99, start: 0, end: 1500, text: "alpha beta", effectiveSpeakerID: 200),
+            Self.sys(id: 100, start: 1500, end: 3000, text: "gamma delta", effectiveSpeakerID: 201)
         ]
         let pairs = SpeakerBleedDeduper.pairsFromConcatenationPrePass(
             mics: mics, systems: systems

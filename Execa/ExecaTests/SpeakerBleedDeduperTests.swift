@@ -17,12 +17,14 @@ import Testing
 struct SpeakerBleedDeduperTests {
     private static func mic(id: Int64, start: Int, end: Int, text: String,
                             confidence: Double? = nil) -> SpeakerBleedDeduper.Segment {
-        .init(id: id, speakerID: 100, source: "mic", startMs: start, endMs: end, text: text, confidence: confidence)
+        .init(id: id, speakerID: 100, effectiveSpeakerID: 100, source: "mic",
+              startMs: start, endMs: end, text: text, confidence: confidence)
     }
 
     private static func sys(id: Int64, start: Int, end: Int, text: String,
                             confidence: Double? = nil) -> SpeakerBleedDeduper.Segment {
-        .init(id: id, speakerID: 200, source: "system", startMs: start, endMs: end, text: text, confidence: confidence)
+        .init(id: id, speakerID: 200, effectiveSpeakerID: 200, source: "system",
+              startMs: start, endMs: end, text: text, confidence: confidence)
     }
 
     // MARK: - Time overlap (shared v1/v2)

@@ -16,7 +16,7 @@ struct SpeakerBleedDedupV2CrossValidationTests {
         text: String,
         confidence: Double? = nil
     ) -> SpeakerBleedDeduper.Segment {
-        .init(id: id, speakerID: speakerID, source: "mic",
+        .init(id: id, speakerID: speakerID, effectiveSpeakerID: speakerID, source: "mic",
               startMs: start, endMs: end, text: text, confidence: confidence)
     }
 
@@ -28,7 +28,7 @@ struct SpeakerBleedDedupV2CrossValidationTests {
         text: String,
         confidence: Double? = nil
     ) -> SpeakerBleedDeduper.Segment {
-        .init(id: id, speakerID: speakerID, source: "system",
+        .init(id: id, speakerID: speakerID, effectiveSpeakerID: speakerID, source: "system",
               startMs: start, endMs: end, text: text, confidence: confidence)
     }
 
