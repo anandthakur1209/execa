@@ -241,10 +241,33 @@ struct SpeakerBleedDedupV2MergeAwareTests {
         // `deduped_against_segment_id` already set. Call
         // SpeakerBleedDeduper.dedup. Verify the FK is wiped first
         // (regardless of whether the algorithm re-flags it).
+        let database = try Self.makeDBWithStaleAuditFK()
+
+        let preFK = try await Self.readAuditFK(database, segmentID: 100)
+        try #require(preFK == 200)
+
+        // Run dedup. Mic and system text don't match, so no new
+        // pair is produced — but the reset must still wipe the
+        // stale FK to NULL.
+        try await database.queue.write { db in
+            _ = try SpeakerBleedDeduper.dedup(meetingID: "m1", version: .v2, in: db)
+        }
+
+        let postFK = try await Self.readAuditFK(database, segmentID: 100)
+        #expect(postFK == nil,
+                "reset-first must wipe stale FK regardless of re-derivation outcome")
+    }
+
+    /// Builds a database whose mic segment 100 carries a stale audit
+    /// FK pointing at system segment 200. Both rows have unrelated
+    /// text so the v2 algorithm produces no new pair — letting the
+    /// test isolate the reset-first behaviour from any re-derivation.
+    private static func makeDBWithStaleAuditFK() throws -> Execa.Database {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("execa-bleed-reset-\(UUID().uuidString).sqlite3")
         let database = try Execa.Database.make(at: tempURL)
-        try await database.queue.write { db in
+        // Done sync via blocking write since this is a one-shot setup.
+        try database.queue.write { db in
             try db.execute(
                 sql: """
                 INSERT INTO meetings (id, title, started_at, status)
@@ -268,12 +291,10 @@ struct SpeakerBleedDedupV2MergeAwareTests {
                     (200, 'm1', 20, 0, 2000, 'completely different system content', 1, NULL, NULL)
                 """
             )
-            // Point mic 100's audit FK at system 200. Done as a
-            // post-insert UPDATE so the FK reference is valid (it
-            // can't be set in the same row's INSERT because 200
-            // wouldn't exist yet at the per-row evaluation point —
-            // and even multi-row INSERTs evaluate FKs eagerly with
-            // `PRAGMA foreign_keys=ON`).
+            // Point mic 100's audit FK at system 200 via a post-INSERT
+            // UPDATE — the row order in the multi-row INSERT can't
+            // safely set the FK because `PRAGMA foreign_keys=ON`
+            // evaluates eagerly per row.
             try db.execute(
                 sql: """
                 UPDATE transcript_segments
@@ -282,32 +303,19 @@ struct SpeakerBleedDedupV2MergeAwareTests {
                 """
             )
         }
+        return database
+    }
 
-        // Pre-condition: mic segment 100 has a stale audit FK at 200.
-        let preFK: Int64?? = try await database.queue.read { db -> Int64?? in
+    private static func readAuditFK(
+        _ database: Execa.Database,
+        segmentID: Int64
+    ) async throws -> Int64? {
+        try await database.queue.read { db in
             try Row.fetchOne(
                 db,
-                sql: "SELECT deduped_against_segment_id FROM transcript_segments WHERE id = ?",
-                arguments: [100]
-            ).map { $0["deduped_against_segment_id"] as Int64? }
+                sql: "SELECT deduped_against_segment_id AS fk FROM transcript_segments WHERE id = ?",
+                arguments: [segmentID]
+            )?["fk"] as Int64?
         }
-        try #require(preFK ?? nil == 200)
-
-        // Run dedup. Mic and system text don't match, so no new
-        // pair is produced — but the reset must still wipe the
-        // stale FK to NULL.
-        try await database.queue.write { db in
-            _ = try SpeakerBleedDeduper.dedup(meetingID: "m1", version: .v2, in: db)
-        }
-
-        let postFK: Int64?? = try await database.queue.read { db -> Int64?? in
-            try Row.fetchOne(
-                db,
-                sql: "SELECT deduped_against_segment_id FROM transcript_segments WHERE id = ?",
-                arguments: [100]
-            ).map { $0["deduped_against_segment_id"] as Int64? }
-        }
-        try #require(postFK != nil, "row should still exist")
-        #expect(postFK ?? nil == nil, "reset-first must wipe stale FK regardless of re-derivation outcome")
     }
 }

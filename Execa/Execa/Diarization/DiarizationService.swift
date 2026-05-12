@@ -106,11 +106,25 @@ actor DiarizationService {
         // view. Recovery: Re-run diarization re-applies both. Future
         // maintainers tempted to collapse this into one transaction:
         // please read this comment + the Phase 3.5 plan first.
-        await runDedupPass(meetingID: meetingID)
+        await rerunDedupForMeeting(meetingID: meetingID)
         await applyStatus(meetingID: meetingID, status: .completed(at: Date()))
     }
 
-    private func runDedupPass(meetingID: String) async {
+    /// Runs (or re-runs) the speaker-bleed dedup pass for one meeting.
+    /// Called at two distinct moments:
+    ///   1. Inline at the end of `runForMeeting` — derives the initial
+    ///      dedup state right after the batch swap lands.
+    ///   2. From `AppCoordinator.mergeSpeakers` / `splitSegment` —
+    ///      Phase 3.5c hook. The user's manual topology change can
+    ///      flip which segments qualify as bleed (Sarvam
+    ///      over-segmentation case: two adjacent system speakers
+    ///      merged into one means previously-scattered mic-side
+    ///      matches now consolidate and clear the cross-validation
+    ///      threshold). `SpeakerBleedDeduper.dedup` is reset-first
+    ///      (Phase 3.5c commit a) so re-running on existing state
+    ///      wipes stale FKs before re-deriving — safe to invoke
+    ///      multiple times.
+    func rerunDedupForMeeting(meetingID: String) async {
         // Two settings, orthogonal:
         //   - `auto_speaker_bleed_dedup` decides WHETHER the pass runs.
         //   - `bleed_dedup_algorithm_version` decides WHICH algorithm

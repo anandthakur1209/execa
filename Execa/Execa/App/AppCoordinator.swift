@@ -21,13 +21,22 @@ actor AppCoordinator {
     private let diarization: DiarizationService
     private let transcriptionProviderFactory: TranscriptionProviderFactory
 
+    /// Tests pass an in-memory or temp-file `database` here so they can
+    /// seed state and observe writes without touching the user's
+    /// `~/Library/Application Support/com.anandthakur.execa/db.sqlite3`.
+    /// Production call sites pass `nil` (the default), which falls back
+    /// to `Database.make()`'s standard file-backed location.
     init(
         transcriptionProviderFactory: @escaping TranscriptionProviderFactory = { _, key in
             SarvamProvider(apiKey: key)
         },
-        diarizeFunction: DiarizationService.DiarizeFunction? = nil
+        diarizeFunction: DiarizationService.DiarizeFunction? = nil,
+        database injectedDatabase: Database? = nil
     ) async throws {
-        let database = try Database.make()
+        let database = try injectedDatabase ?? Database.make()
+        // ^ `Database.make()` throws; the `try` covers it. When
+        // `injectedDatabase` is non-nil, `??` short-circuits and
+        // `make()` is never invoked.
         self.database = database
         let settings = SettingsStore(database: database)
         self.settings = settings
@@ -193,7 +202,15 @@ actor AppCoordinator {
     /// a display-time alias, not a re-attribution); only `lines`'
     /// `speakerLabel` is rewritten so the user sees the post-merge
     /// label immediately. UI call sites should use this wrapper.
+    ///
+    /// Phase 3.5c: auto-rerun dedup as the final step. A user-driven
+    /// merge can flip which segments qualify as bleed (the Sarvam
+    /// over-segmentation case), so the dedup state captured at swap
+    /// time is stale relative to the new effective-speaker topology.
+    /// Re-derive against the merged topology; `runDedupPass` is
+    /// reset-first so stale audit FKs get wiped before re-derivation.
     func mergeSpeakers(sourceSpeakerID: Int64, intoTargetSpeakerID targetSpeakerID: Int64) async throws {
+        let meetingID = await fetchMeetingID(forSpeakerID: sourceSpeakerID)
         try await speakerLabelManager.merge(
             sourceSpeakerID: sourceSpeakerID,
             intoTargetSpeakerID: targetSpeakerID
@@ -203,13 +220,23 @@ actor AppCoordinator {
         await MainActor.run {
             store.applyMerge(sourceSpeakerID: sourceSpeakerID, targetLabel: targetLabel)
         }
+        if let meetingID {
+            await diarization.rerunDedupForMeeting(meetingID: meetingID)
+        }
     }
 
     /// Splits the segment off into a new speaker AND retargets the
     /// matching live `TranscriptLine` (by `databaseSegmentID`) at the
     /// new speakers row. UI call sites should use this wrapper.
+    ///
+    /// Phase 3.5c: auto-rerun dedup as the final step. Splitting a
+    /// segment can both flag previously-unflagged segments (whose
+    /// match was hidden behind the old grouping) and clear stale FKs
+    /// for the split-off segment, so re-derive against the post-split
+    /// topology. Reset-first semantics apply (see `mergeSpeakers`).
     @discardableResult
     func splitSegment(segmentID: Int64, intoNewLabel newLabel: String) async throws -> Int64 {
+        let meetingID = await fetchMeetingID(forSegmentID: segmentID)
         let newSpeakerID = try await speakerLabelManager.split(
             segmentID: segmentID,
             intoNewLabel: newLabel
@@ -219,6 +246,9 @@ actor AppCoordinator {
         await MainActor.run {
             store.applySplit(segmentID: segmentID, newSpeakerID: newSpeakerID, newLabel: trimmed)
         }
+        if let meetingID {
+            await diarization.rerunDedupForMeeting(meetingID: meetingID)
+        }
         return newSpeakerID
     }
 
@@ -226,6 +256,34 @@ actor AppCoordinator {
         await (try? database.queue.read { db in
             try SpeakerQueries.displayLabel(speakerID: speakerID, in: db)
         }) ?? nil ?? ""
+    }
+
+    /// Resolves the meeting_id for a given `speakers.id`. Used by
+    /// `mergeSpeakers` to thread the meeting ID into the post-merge
+    /// dedup re-run hook. Returns `nil` if the speaker row doesn't
+    /// resolve — in that case `SpeakerLabelManager.merge` would have
+    /// thrown anyway, so the caller's guard skips the re-run.
+    private func fetchMeetingID(forSpeakerID speakerID: Int64) async -> String? {
+        await (try? database.queue.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT meeting_id FROM speakers WHERE id = ?",
+                arguments: [speakerID]
+            )
+        }) ?? nil
+    }
+
+    /// Resolves the meeting_id for a given `transcript_segments.id`.
+    /// Used by `splitSegment` for the post-split dedup re-run hook.
+    /// Returns `nil` if the segment row doesn't resolve.
+    private func fetchMeetingID(forSegmentID segmentID: Int64) async -> String? {
+        await (try? database.queue.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT meeting_id FROM transcript_segments WHERE id = ?",
+                arguments: [segmentID]
+            )
+        }) ?? nil
     }
 
     /// Re-run diarization on demand (Phase 3 commit 7's
